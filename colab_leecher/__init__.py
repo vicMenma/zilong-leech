@@ -13,7 +13,7 @@ logging.basicConfig(
     format="[%(asctime)s] [%(levelname)s] %(name)s: %(message)s",
 )
 
-CREDENTIALS_PATH = Path("/content/zilong/credentials.json")
+CREDENTIALS_PATH = Path("/content/zilong-leech/credentials.json")
 
 
 def load_credentials(path: Path = CREDENTIALS_PATH) -> dict:
