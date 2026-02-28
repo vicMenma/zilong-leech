@@ -1,5 +1,4 @@
 # @title 🖥️ Zilong Code
-
 API_ID    = 0                              # @param {type: "integer"}
 API_HASH  = ""   # @param {type: "string"}
 BOT_TOKEN = ""  # @param {type: "string"}
@@ -45,9 +44,9 @@ _Thread.start()
 if os.path.exists("/content/sample_data"):
     shutil.rmtree("/content/sample_data")
 
-subprocess.run("git clone https://github.com/vicMenma/zilong.git", shell=True)
+subprocess.run("git clone https://github.com/vicMenma/zilong-leech.git", shell=True)
 subprocess.run("apt update && apt install -y ffmpeg aria2", shell=True)
-subprocess.run("pip3 install -r /content/zilong/requirements.txt", shell=True)
+subprocess.run("pip3 install -r /content/zilong-leech/requirements.txt", shell=True)
 
 credentials = {
     "API_ID":    API_ID,
@@ -57,14 +56,14 @@ credentials = {
     "DUMP_ID":   DUMP_ID,
 }
 
-with open('/content/zilong/credentials.json', 'w') as f:
+with open('/content/zilong-leech/credentials.json', 'w') as f:
     json.dump(credentials, f)
 
 Working = False
 
-if os.path.exists("/content/zilong/my_bot.session"):
-    os.remove("/content/zilong/my_bot.session")
+if os.path.exists("/content/zilong-leech/my_bot.session"):
+    os.remove("/content/zilong-leech/my_bot.session")
 
 print("\rStarting Bot....")
 
-!cd /content/zilong && python3 -m colab_leecher
+!cd /content/zilong-leech && python3 -m colab_leecher
