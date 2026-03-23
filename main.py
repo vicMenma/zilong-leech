@@ -1,9 +1,17 @@
 # @title 🖥️ Zilong Code
 API_ID    = 0                              # @param {type: "integer"}
-API_HASH  = ""   # @param {type: "string"}
-BOT_TOKEN = ""  # @param {type: "string"}
-USER_ID   = 0                           # @param {type: "integer"}
-DUMP_ID   = 0                                     # @param {type: "integer"} — unused, keep as 0
+API_HASH  = ""                             # @param {type: "string"}
+BOT_TOKEN = ""                             # @param {type: "string"}
+USER_ID   = 0                              # @param {type: "integer"}
+DUMP_ID   = 0                              # @param {type: "integer"} — unused, keep as 0
+
+# ── CloudConvert webhook (optional) ──────────────────────────────────────────
+# Get a free ngrok token at: https://dashboard.ngrok.com/get-started/your-authtoken
+NGROK_TOKEN       = ""  # @param {type: "string"}
+# Signing secret from CloudConvert → Dashboard → Webhooks → Signing Secret
+CC_WEBHOOK_SECRET = ""  # @param {type: "string"}
+# API key from CloudConvert → Dashboard → API → API Keys (for /hardsub future use)
+CC_API_KEY        = ""  # @param {type: "string"}
 
 import subprocess, time, json, shutil, os
 from IPython.display import clear_output
@@ -54,6 +62,10 @@ credentials = {
     "BOT_TOKEN": BOT_TOKEN,
     "USER_ID":   USER_ID,
     "DUMP_ID":   DUMP_ID,
+    # CloudConvert — only written when non-empty so credentials.json stays clean
+    **({"NGROK_TOKEN":       NGROK_TOKEN}       if NGROK_TOKEN       else {}),
+    **({"CC_WEBHOOK_SECRET": CC_WEBHOOK_SECRET} if CC_WEBHOOK_SECRET else {}),
+    **({"CC_API_KEY":        CC_API_KEY}        if CC_API_KEY        else {}),
 }
 
 with open('/content/zilong-leech/credentials.json', 'w') as f:

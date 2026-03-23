@@ -17,3 +17,4 @@ uvloop
 yt_dlp
 pymegatools
 ffmpeg
+pyngrok
