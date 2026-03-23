@@ -35,13 +35,25 @@ def load_credentials(path: Path = CREDENTIALS_PATH) -> dict:
 # Load credentials
 credentials = load_credentials()
 
-API_ID = int(credentials["API_ID"])
-API_HASH = str(credentials["API_HASH"])
+API_ID    = int(credentials["API_ID"])
+API_HASH  = str(credentials["API_HASH"])
 BOT_TOKEN = str(credentials["BOT_TOKEN"])
-OWNER = int(credentials["USER_ID"])
-DUMP_ID = str(credentials["DUMP_ID"])
+OWNER     = int(credentials["USER_ID"])
+DUMP_ID   = str(credentials["DUMP_ID"])
+
+# ── CloudConvert webhook (all optional) ───────────────────────
+# NGROK_TOKEN      — free token from ngrok.com; exposes the local webhook server
+# CC_WEBHOOK_SECRET — signing secret from CloudConvert's webhook settings page
+# CC_API_KEY        — API key(s) for /hardsub and /convert; comma-separated for rotation
+NGROK_TOKEN       = str(credentials.get("NGROK_TOKEN",       ""))
+CC_WEBHOOK_SECRET = str(credentials.get("CC_WEBHOOK_SECRET", ""))
+CC_API_KEY        = str(credentials.get("CC_API_KEY",        ""))
 
 log.info("Credentials loaded successfully")
+if NGROK_TOKEN:
+    log.info("CloudConvert webhook enabled (NGROK_TOKEN set)")
+if CC_API_KEY:
+    log.info("CloudConvert API key configured")
 
 # Use uvloop as event loop policy
 install()

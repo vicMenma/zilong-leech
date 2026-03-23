@@ -4,10 +4,10 @@ import platform
 import psutil
 from datetime import datetime
 from asyncio import sleep, get_event_loop
-from pyrogram import filters
+from pyrogram import filters, idle
 from pyrogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from colab_leecher import colab_bot, OWNER
+from colab_leecher import colab_bot, OWNER, NGROK_TOKEN, CC_WEBHOOK_SECRET
 from colab_leecher.utility.handler import cancelTask
 from colab_leecher.utility.variables import BOT, MSG, BotTimes, Paths
 from colab_leecher.utility.task_manager import taskScheduler
@@ -174,7 +174,7 @@ async def setFix(client, message):
         await message.delete()
 
 # ──────────────────────────────────────────────
-#  Réception du lien — leech direct (no mode selection)
+#  Réception du lien — leech direct
 # ──────────────────────────────────────────────
 @colab_bot.on_message(filters.create(isLink) & ~filters.photo & filters.private)
 async def handle_url(client, message):
@@ -187,7 +187,6 @@ async def handle_url(client, message):
         return
 
     src = message.text.splitlines()
-    # Parse optional custom name: last line in [brackets]
     for _ in range(1):
         if not src: break
         last = src[-1].strip()
@@ -226,13 +225,11 @@ async def callbacks(client, cq):
     data    = cq.data
     chat_id = cq.message.chat.id
 
-    # ── Stats ──────────────────────────────────
     if data == "stats_refresh":
         try: await cq.message.edit_text(_stats_text(), reply_markup=_STATS_KB)
         except Exception: pass
         return
 
-    # ── Settings ───────────────────────────────
     if data == "video":
         await cq.message.edit_text(
             "🎥 <b>PARAMÈTRES VIDÉO</b>\n"
@@ -326,5 +323,51 @@ async def handle_photo(client, message):
     await sleep(10)
     await message_deleter(message, msg)
 
-logging.info("⚡ Zilong démarré.")
-colab_bot.run()
+
+# ──────────────────────────────────────────────
+#  Async main — start bot + optional CC webhook
+# ──────────────────────────────────────────────
+async def _main():
+    await colab_bot.start()
+    logging.info("⚡ Zilong démarré.")
+
+    # ── CloudConvert webhook (only when NGROK_TOKEN or local testing) ──
+    if NGROK_TOKEN or CC_WEBHOOK_SECRET:
+        try:
+            import colab_leecher.cloudconvert_hook as _cc_hook
+            _cc_hook.WEBHOOK_SECRET = CC_WEBHOOK_SECRET
+
+            webhook_url = await _cc_hook.start_webhook_server(ngrok_token=NGROK_TOKEN)
+
+            if webhook_url:
+                logging.info("☁️  CC webhook URL: %s", webhook_url)
+                await colab_bot.send_message(
+                    OWNER,
+                    f"☁️ <b>CloudConvert Webhook Active</b>\n\n"
+                    f"Paste this URL in CloudConvert → Webhooks:\n"
+                    f"<code>{webhook_url}</code>\n\n"
+                    f"<i>Event to subscribe: <b>job.finished</b></i>",
+                )
+            else:
+                logging.info("☁️  CC webhook server running on localhost only (no ngrok URL).")
+        except Exception as exc:
+            logging.error("Failed to start CC webhook server: %s", exc)
+    else:
+        logging.info("ℹ️  CloudConvert webhook disabled "
+                     "(set NGROK_TOKEN in credentials.json to enable).")
+
+    await idle()
+
+    # Graceful shutdown
+    try:
+        import colab_leecher.cloudconvert_hook as _cc_hook
+        await _cc_hook.stop_webhook_server()
+    except Exception:
+        pass
+
+    await colab_bot.stop()
+
+
+# Entry point — use the pre-created event loop from __init__.py
+from colab_leecher import loop
+loop.run_until_complete(_main())
