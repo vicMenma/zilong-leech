@@ -344,8 +344,6 @@ async def _main():
                 await colab_bot.send_message(
                     OWNER,
                     f"☁️ <b>CloudConvert Webhook Active</b>\n\n"
-                    f"Paste this URL in CloudConvert → Webhooks:\n"
-                    f"<code>{webhook_url}</code>\n\n"
                     f"<i>Event to subscribe: <b>job.finished</b></i>",
                 )
             else:
