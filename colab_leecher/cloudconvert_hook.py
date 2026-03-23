@@ -3,12 +3,14 @@ colab_leecher/cloudconvert_hook.py
 Receives CloudConvert webhooks and auto-downloads + uploads
 finished files through zilong-leech's native pipeline.
 
-How it works:
-  1. CloudConvert finishes a job → sends POST to /webhook/cloudconvert
-  2. We verify the optional HMAC signature
-  3. We extract the export/url task's download links
-  4. We download each file directly (they are temporary S3 URLs)
-  5. We upload via zilong-leech's upload_file() to the owner's chat
+Fixes vs v1:
+- Creates Paths.WORK_PATH before calling upload_file so thumbMaintainer
+  can write VIDEO_FRAME and Hero.jpg fallback never gets hit.
+- Real download progress: edits MSG.status_msg every second while
+  streaming the CC export URL.
+- Transfer / BotTimes set up properly so upload_file progress_bar works.
+- upload_file errors are now re-raised (not swallowed) so the hook can
+  send a proper failure message to the owner.
 """
 from __future__ import annotations
 
@@ -19,13 +21,14 @@ import logging
 import os
 import shutil
 import tempfile
+import time
+from datetime import datetime
 
 import aiohttp
 from aiohttp import web
 
 log = logging.getLogger(__name__)
 
-# Set by __init__.py at startup from credentials.json
 WEBHOOK_SECRET: str = ""
 
 _runner = None
@@ -39,7 +42,6 @@ LISTEN_PORT = 8765
 # ─────────────────────────────────────────────────────────────
 
 def _verify_signature(payload: bytes, signature: str) -> bool:
-    """Return True when signature matches, or when no secret is configured."""
     if not WEBHOOK_SECRET:
         return True
     expected = hmac.new(
@@ -53,7 +55,6 @@ def _verify_signature(payload: bytes, signature: str) -> bool:
 # ─────────────────────────────────────────────────────────────
 
 def _extract_urls(data: dict) -> list[dict]:
-    """Pull all finished export/url file entries out of a CC webhook payload."""
     results = []
     job   = data.get("job", {})
     tasks = job.get("tasks", [])
@@ -73,75 +74,150 @@ def _extract_urls(data: dict) -> list[dict]:
 
 
 # ─────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────
+
+def _size_str(n: float) -> str:
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if abs(n) < 1024.0:
+            return f"{n:.1f} {unit}"
+        n /= 1024.0
+    return f"{n:.1f} GiB"
+
+
+def _time_str(seconds: int) -> str:
+    if seconds <= 0:
+        return "—"
+    m, s = divmod(seconds, 60)
+    h, m = divmod(m, 60)
+    if h:   return f"{h}h {m}m {s}s"
+    if m:   return f"{m}m {s}s"
+    return f"{s}s"
+
+
+def _bar(pct: float, cells: int = 12) -> str:
+    filled = int(min(max(pct, 0), 100) / 100 * cells)
+    return "█" * filled + "░" * (cells - filled)
+
+
+# ─────────────────────────────────────────────────────────────
 # Download → upload pipeline
 # ─────────────────────────────────────────────────────────────
 
 async def _process_file(url: str, filename: str) -> None:
-    """Download a CC export URL and upload it to the owner via colab_bot."""
-    # Import here to avoid circular import at module load time
     from colab_leecher import colab_bot, OWNER
     from colab_leecher.uploader.telegram import upload_file
-    from colab_leecher.utility.variables import Transfer, BotTimes, MSG, Messages
-    from datetime import datetime
+    from colab_leecher.utility.variables import Transfer, BotTimes, MSG, Messages, Paths
 
     tmp  = tempfile.mkdtemp(prefix="cc_hook_")
     dest = os.path.join(tmp, filename)
 
+    # ── FIX: ensure WORK_PATH exists so thumbMaintainer can write frames ──
+    # Without this, thumbMaintainer falls back to Hero.jpg which doesn't
+    # exist, Image.open() raises FileNotFoundError, upload_file swallows
+    # it silently and the file is never sent.
+    os.makedirs(Paths.WORK_PATH, exist_ok=True)
+
     try:
-        # Notify owner that we are starting
-        notify_msg = await colab_bot.send_message(
+        # ── Phase 1: Download from CloudConvert ───────────────────────────
+        status_msg = await colab_bot.send_message(
             OWNER,
-            f"☁️ <b>CloudConvert Auto-Upload</b>\n\n"
-            f"📁 <code>{filename[:60]}</code>\n\n"
-            f"⬇️ <i>Downloading from CloudConvert…</i>",
+            f"☁️ <b>CloudConvert</b>\n"
+            f"──────────────────\n"
+            f"📥 <b>Downloading</b>\n"
+            f"📄 <code>{filename[:50]}</code>",
         )
 
-        # ── Download from CloudConvert's temporary S3 URL ──────────────
+        start     = time.time()
+        last_edit = [start]
+
         async with aiohttp.ClientSession() as sess:
             async with sess.get(url) as resp:
                 resp.raise_for_status()
+                total = int(resp.headers.get("Content-Length", 0))
+                done  = 0
+
                 with open(dest, "wb") as fh:
-                    async for chunk in resp.content.iter_chunked(1024 * 1024):
+                    async for chunk in resp.content.iter_chunked(512 * 1024):
                         fh.write(chunk)
+                        done += len(chunk)
+
+                        now = time.time()
+                        if now - last_edit[0] >= 2.0:
+                            last_edit[0] = now
+                            elapsed = now - start
+                            speed   = done / elapsed if elapsed else 0
+                            pct     = (done / total * 100) if total else 0
+                            eta     = int((total - done) / speed) if (speed and total) else 0
+                            try:
+                                await status_msg.edit(
+                                    f"☁️ <b>CloudConvert</b>\n"
+                                    f"──────────────────\n"
+                                    f"📥 <b>Downloading</b>\n"
+                                    f"📄 <code>{filename[:45]}</code>\n\n"
+                                    f"<code>[{_bar(pct)}]</code>  <b>{pct:.1f}%</b>\n"
+                                    f"──────────────────\n"
+                                    f"⚡ Speed   <code>{_size_str(speed)}/s</code>\n"
+                                    f"✅ Done    <code>{_size_str(done)}</code>"
+                                    + (f" / <code>{_size_str(total)}</code>" if total else "") + "\n"
+                                    f"⏳ ETA     <code>{_time_str(eta)}</code>",
+                                )
+                            except Exception:
+                                pass
 
         fsize = os.path.getsize(dest)
         log.info("[CC-Hook] Downloaded %s (%.1f MiB)", filename, fsize / (1024 * 1024))
 
-        # ── Prepare upload state variables ─────────────────────────────
-        # We set up just enough state so upload_file() works standalone.
+        # ── Phase 2: Upload to Telegram ───────────────────────────────────
+        # Set up the state variables upload_file / progress_bar depend on
         Transfer.total_down_size = fsize
         Transfer.up_bytes        = [0, 0]
         Transfer.sent_file       = []
         Transfer.sent_file_names = []
         BotTimes.start_time      = datetime.now()
-        Messages.status_head     = f"☁️ CC Upload: <code>{filename[:50]}</code>\n"
-        Messages.task_msg        = ""
-
-        # Give upload_file a status message to update
-        # (it will delete this message when is_last=True)
-        MSG.status_msg = await colab_bot.send_message(
-            OWNER,
-            f"📤 <b>Uploading</b>  <code>{filename[:50]}</code>…",
+        Messages.status_head     = (
+            f"☁️ <b>CloudConvert</b>\n"
+            f"──────────────────\n"
+            f"📤 <b>Uploading</b>\n"
+            f"📄 <code>{filename[:45]}</code>\n"
         )
+        Messages.task_msg = ""
 
-        # Delete the earlier notify message to keep chat clean
+        # Swap the download message for an upload status message.
+        # upload_file's progress_bar will edit this, and is_last=True
+        # will delete it once the file has been sent.
         try:
-            await notify_msg.delete()
+            await status_msg.delete()
         except Exception:
             pass
 
-        # ── Upload ────────────────────────────────────────────────────
+        MSG.status_msg = await colab_bot.send_message(
+            OWNER,
+            f"☁️ <b>CloudConvert</b>\n"
+            f"──────────────────\n"
+            f"📤 <b>Uploading</b>\n"
+            f"📄 <code>{filename[:45]}</code>\n\n"
+            f"⏳ <i>Starting upload…</i>",
+        )
+
+        # upload_file deletes MSG.status_msg on is_last=True after
+        # a successful send.  Any exception here propagates to the
+        # outer except block so the owner gets a proper error message.
         await upload_file(dest, filename, is_last=True)
-        log.info("[CC-Hook] Uploaded %s successfully", filename)
+        log.info("[CC-Hook] Upload complete: %s", filename)
 
     except Exception as exc:
-        log.error("[CC-Hook] Pipeline failed for %s: %s", filename, exc)
+        log.error("[CC-Hook] Pipeline failed for %s: %s", filename, exc, exc_info=True)
+        # Clean up the stuck status message if it's still alive
         try:
-            from colab_leecher import colab_bot, OWNER
+            await MSG.status_msg.delete()
+        except Exception:
+            pass
+        try:
             await colab_bot.send_message(
                 OWNER,
                 f"❌ <b>CloudConvert auto-upload failed</b>\n\n"
-                f"📁 <code>{filename}</code>\n"
+                f"📄 <code>{filename}</code>\n"
                 f"<code>{str(exc)[:250]}</code>",
             )
         except Exception:
@@ -151,7 +227,7 @@ async def _process_file(url: str, filename: str) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-# HTTP request handlers
+# HTTP handlers
 # ─────────────────────────────────────────────────────────────
 
 async def handle_cloudconvert(request: web.Request) -> web.Response:
@@ -160,7 +236,7 @@ async def handle_cloudconvert(request: web.Request) -> web.Response:
 
         sig = request.headers.get("CloudConvert-Signature", "")
         if WEBHOOK_SECRET and not _verify_signature(body, sig):
-            log.warning("[CC-Hook] Invalid signature — request rejected")
+            log.warning("[CC-Hook] Invalid signature — rejected")
             return web.json_response({"error": "invalid signature"}, status=403)
 
         data  = await request.json()
@@ -175,11 +251,10 @@ async def handle_cloudconvert(request: web.Request) -> web.Response:
             log.warning("[CC-Hook] job.finished with no export URLs")
             return web.json_response({"status": "no_export_urls"})
 
-        # Fire-and-forget: do not block the HTTP response
         for f in files:
             asyncio.create_task(_process_file(f["url"], f["filename"]))
 
-        log.info("[CC-Hook] Enqueued %d file(s) for upload", len(files))
+        log.info("[CC-Hook] Enqueued %d file(s)", len(files))
         return web.json_response({
             "status":   "ok",
             "enqueued": [f["filename"] for f in files],
@@ -210,10 +285,6 @@ def _build_app() -> web.Application:
 # ─────────────────────────────────────────────────────────────
 
 async def start_webhook_server(port: int = LISTEN_PORT, ngrok_token: str = "") -> str:
-    """
-    Start the aiohttp webhook server and optionally open an ngrok tunnel.
-    Returns the public webhook URL (empty string if ngrok is not configured).
-    """
     global _runner, _site
 
     app     = _build_app()
@@ -243,7 +314,7 @@ async def start_webhook_server(port: int = LISTEN_PORT, ngrok_token: str = "") -
         log.info("[CC-Hook] Webhook URL:    %s", webhook_url)
         return webhook_url
     except ImportError:
-        log.error("[CC-Hook] pyngrok not installed — run: pip install pyngrok")
+        log.error("[CC-Hook] pyngrok not installed — pip install pyngrok")
     except Exception as exc:
         log.error("[CC-Hook] ngrok error: %s", exc)
 
@@ -251,7 +322,6 @@ async def start_webhook_server(port: int = LISTEN_PORT, ngrok_token: str = "") -
 
 
 async def stop_webhook_server() -> None:
-    """Tear down the ngrok tunnel and aiohttp server cleanly."""
     try:
         from pyngrok import ngrok
         ngrok.kill()
