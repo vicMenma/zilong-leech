@@ -15,9 +15,38 @@ from colab_leecher.utility.helper import (
     isLink, setThumbnail, message_deleter, send_settings,
     sizeUnit, getTime, is_ytdl_link, _pct_bar,
 )
+from colab_leecher.stream_extractor import (
+    analyse, get_session, clear_session,
+    kb_type, kb_video, kb_audio, kb_subs,
+    dl_video, dl_audio, dl_sub,
+)
+import colab_leecher.hardsub as _hardsub_module  # registers /hardsub handlers
 
 def _owner(m): return m.chat.id == OWNER
 def _ring(p):  return "🟢" if p < 40 else ("🟡" if p < 70 else "🔴")
+
+
+def _fmt_dur(secs: float) -> str:
+    s = int(max(0, secs))
+    h, s = divmod(s, 3600)
+    m, s = divmod(s, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+async def _show_sx_type_menu(msg, session: dict) -> None:
+    """Edit msg to show the stream type selection menu."""
+    v = len(session["video"])
+    a = len(session["audio"])
+    s = len(session["subs"])
+    dur_s = f"  ⏱ <code>{_fmt_dur(session.get('duration', 0))}</code>" if session.get("duration") else ""
+    await msg.edit_text(
+        "🎞 <b>STREAM EXTRACTOR</b>\n"
+        "──────────────────\n\n"
+        f"<b>{session['title'][:55]}</b>{dur_s}\n\n"
+        f"🎬 Vidéo  <code>{v}</code>   🎵 Audio  <code>{a}</code>   💬 Sous-titres  <code>{s}</code>\n\n"
+        "Choisir le type de piste :",
+        reply_markup=kb_type(v, a, s),
+    )
 
 # ──────────────────────────────────────────────
 #  /start
@@ -52,10 +81,23 @@ async def help_cmd(client, message):
         "──────────────────\n"
         "⚙️ <b>Commandes</b>\n"
         "  /settings · /stats · /ping\n"
-        "  /cancel · /stop\n\n"
+        "  /cancel · /stop\n"
+        "  /hardsub — Graver sous-titres via CloudConvert\n\n"
         "──────────────────\n"
         "🎛 <b>Options (après le lien)</b>\n"
         "  <code>[nom.ext]</code>  — nom personnalisé\n\n"
+        "──────────────────\n"
+        "🎞 <b>Stream Extractor</b>\n"
+        "  Bouton <b>🎞 Stream Extractor</b> sur chaque lien.\n"
+        "  Choisir vidéo / audio / sous-titres\n"
+        "  avec langue, codec, résolution, taille.\n\n"
+        "📊 <b>Media Info</b>\n"
+        "  Bouton <b>📊 Media Info</b> sur chaque lien.\n"
+        "  Rapport complet publié sur Telegra.ph.\n\n"
+        "🔥 <b>Hardsub</b>\n"
+        "  Bouton <b>🔥 Hardsub (CC)</b> sur chaque lien,\n"
+        "  ou commande /hardsub.\n"
+        "  Grave le sous-titre dans la vidéo via CloudConvert.\n\n"
         "🖼 Envoie une <b>image</b> pour définir la miniature"
     )
     msg = await message.reply_text(text)
@@ -174,8 +216,17 @@ async def setFix(client, message):
         await message.delete()
 
 # ──────────────────────────────────────────────
-#  Réception du lien — leech direct
+#  Réception du lien — choix du mode
 # ──────────────────────────────────────────────
+
+def _mode_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📄 Leech Normal",  callback_data="mode_normal")],
+        [InlineKeyboardButton("🎞 Stream Extractor", callback_data="sx_open"),
+         InlineKeyboardButton("📊 Media Info",       callback_data="mi_open")],
+        [InlineKeyboardButton("🔥 Hardsub (CC)",  callback_data="hs_from_url")],
+    ])
+
 @colab_bot.on_message(filters.create(isLink) & ~filters.photo & filters.private)
 async def handle_url(client, message):
     if not _owner(message): return
@@ -202,20 +253,10 @@ async def handle_url(client, message):
     n     = len([l for l in src if l.strip()])
     label = "🏮 YTDL" if BOT.Mode.ytdl else "🔗 Lien"
 
-    MSG.status_msg = await message.reply_text(
-        f"⏳ <i>Démarrage du leech...</i>\n{label}  ·  <code>{n}</code> source(s)",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("❌ Annuler", callback_data="cancel")
-        ]]),
-        quote=True,
+    await message.reply_text(
+        f"{label}  ·  <code>{n}</code> source(s)\n<b>Choisir le mode :</b>",
+        reply_markup=_mode_keyboard(), quote=True,
     )
-
-    BOT.State.task_going = True
-    BOT.State.started    = False
-    BotTimes.start_time  = datetime.now()
-    BOT.TASK = get_event_loop().create_task(taskScheduler())
-    await BOT.TASK
-    BOT.State.task_going = False
 
 # ──────────────────────────────────────────────
 #  Callbacks
@@ -230,6 +271,241 @@ async def callbacks(client, cq):
         except Exception: pass
         return
 
+    # ── Leech normal ───────────────────────────
+    if data == "mode_normal":
+        await cq.message.delete()
+        MSG.status_msg = await colab_bot.send_message(
+            chat_id=OWNER, text="⏳ <i>Démarrage du leech...</i>",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Annuler", callback_data="cancel")
+            ]]),
+        )
+        BOT.State.task_going = True
+        BOT.State.started    = False
+        BotTimes.start_time  = datetime.now()
+        BOT.TASK = get_event_loop().create_task(taskScheduler())
+        await BOT.TASK
+        BOT.State.task_going = False
+        return
+
+    # ════════════════════════════════════════════
+    #  STREAM EXTRACTOR
+    # ════════════════════════════════════════════
+
+    if data == "sx_open":
+        url = (BOT.SOURCE or [None])[0]
+        if not url:
+            await cq.answer("Aucun URL trouvé.", show_alert=True); return
+
+        await cq.message.edit_text(
+            "🎞 <b>STREAM EXTRACTOR</b>\n"
+            "──────────────────\n\n"
+            f"⏳ <i>Analyse des pistes...</i>\n"
+            f"<code>{url[:70]}{'…' if len(url) > 70 else ''}</code>"
+        )
+
+        session = await analyse(url, chat_id)
+
+        if not session or (not session["video"] and not session["audio"] and not session["subs"]):
+            await cq.message.edit_text(
+                "🎞 <b>STREAM EXTRACTOR</b>\n"
+                "──────────────────\n\n"
+                "❌ Impossible d'extraire les pistes.\n"
+                "<i>Vérifiez que le lien est accessible et compatible.</i>",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⏎ Retour", callback_data="sx_back")
+                ]])
+            )
+            return
+
+        await _show_sx_type_menu(cq.message, session)
+        return
+
+    if data == "sx_type":
+        session = get_session(chat_id)
+        if not session:
+            await cq.answer("Session expirée. Renvoie le lien.", show_alert=True); return
+        await _show_sx_type_menu(cq.message, session)
+        return
+
+    if data == "sx_video":
+        session = get_session(chat_id)
+        if not session: await cq.answer("Session expirée.", show_alert=True); return
+        if not session["video"]: await cq.answer("Aucune piste vidéo.", show_alert=True); return
+        dur_s = f"  ⏱ <code>{_fmt_dur(session.get('duration', 0))}</code>" if session.get("duration") else ""
+        await cq.message.edit_text(
+            f"🎬 <b>PISTES VIDÉO</b>\n"
+            f"──────────────────\n"
+            f"<i>{session['title'][:50]}</i>{dur_s}\n\n"
+            "Appuie pour télécharger :",
+            reply_markup=kb_video(session)
+        )
+        return
+
+    if data == "sx_audio":
+        session = get_session(chat_id)
+        if not session: await cq.answer("Session expirée.", show_alert=True); return
+        if not session["audio"]: await cq.answer("Aucune piste audio.", show_alert=True); return
+        await cq.message.edit_text(
+            "🎵 <b>PISTES AUDIO</b>\n"
+            "──────────────────\n"
+            "<i>drapeau  langue  [codec]  débit  taille</i>\n\n"
+            "Appuie pour télécharger :",
+            reply_markup=kb_audio(session)
+        )
+        return
+
+    if data == "sx_subs":
+        session = get_session(chat_id)
+        if not session: await cq.answer("Session expirée.", show_alert=True); return
+        if not session["subs"]: await cq.answer("Aucun sous-titre.", show_alert=True); return
+        await cq.message.edit_text(
+            "💬 <b>SOUS-TITRES</b>\n"
+            "──────────────────\n"
+            "<i>drapeau  langue  [format]</i>\n\n"
+            "Appuie pour télécharger :",
+            reply_markup=kb_subs(session)
+        )
+        return
+
+    if data == "sx_back":
+        clear_session(chat_id)
+        n     = len([l for l in (BOT.SOURCE or []) if l.strip()])
+        label = "🏮 YTDL" if BOT.Mode.ytdl else "🔗 Lien"
+        await cq.message.edit_text(
+            f"{label}  ·  <code>{n}</code> source(s)\n<b>Choisir le mode :</b>",
+            reply_markup=_mode_keyboard()
+        )
+        return
+
+    # ── Téléchargement d'un stream ─────────────
+    if data.startswith("sx_dl_"):
+        session = get_session(chat_id)
+        if not session: await cq.answer("Session expirée.", show_alert=True); return
+
+        parts = data.split("_")   # ["sx","dl","video","0"]
+        kind  = parts[2]
+        idx   = int(parts[3])
+
+        stream = (session["video"] if kind == "video"
+                  else session["audio"] if kind == "audio"
+                  else session["subs"])[idx]
+
+        kind_fr = {"video": "Vidéo", "audio": "Audio", "sub": "Sous-titre"}.get(kind, kind)
+        await cq.message.edit_text(
+            "🎞 <b>STREAM EXTRACTOR</b>\n"
+            "──────────────────\n\n"
+            f"⬇️ <i>Téléchargement {kind_fr}...</i>\n\n"
+            f"<code>{stream['label'][:60]}</code>\n\n"
+            "⏳ <i>Patiente...</i>",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Annuler", callback_data="cancel")
+            ]])
+        )
+        MSG.status_msg = cq.message
+
+        os.makedirs(Paths.down_path, exist_ok=True)
+        try:
+            if kind == "video":
+                fp = await dl_video(session, idx, Paths.down_path)
+            elif kind == "audio":
+                fp = await dl_audio(session, idx, Paths.down_path)
+            else:
+                fp = await dl_sub(session, idx, Paths.down_path)
+
+            from colab_leecher.uploader.telegram import upload_file
+            await upload_file(fp, os.path.basename(fp), is_last=True)
+            clear_session(chat_id)
+
+        except Exception as e:
+            logging.error(f"[StreamDL] {e}")
+            try:
+                await cq.message.edit_text(
+                    "🎞 <b>STREAM EXTRACTOR</b>\n"
+                    "──────────────────\n\n"
+                    f"❌ <b>Erreur :</b> <code>{e}</code>"
+                )
+            except Exception:
+                pass
+        return
+
+    # ════════════════════════════════════════════
+    #  MEDIA INFO
+    # ════════════════════════════════════════════
+
+    if data == "mi_open":
+        url = (BOT.SOURCE or [None])[0]
+        if not url:
+            await cq.answer("Aucun URL trouvé.", show_alert=True); return
+
+        await cq.message.edit_text(
+            "📊 <b>MEDIA INFO</b>\n"
+            "──────────────────\n\n"
+            "⏳ <i>Téléchargement et analyse en cours...</i>\n"
+            f"<code>{url[:70]}{'…' if len(url) > 70 else ''}</code>"
+        )
+
+        try:
+            from colab_leecher.media_info import get_inline_summary, get_mediainfo, post_to_telegraph
+            import tempfile as _tf
+
+            # Download to a temp file
+            tmp_dir  = _tf.mkdtemp(prefix="mi_", dir=getattr(Paths, "WORK_PATH", "/tmp"))
+            fname    = url.split("/")[-1].split("?")[0][:60] or "media"
+            tmp_path = os.path.join(tmp_dir, fname)
+
+            import aiohttp as _aio
+            async with _aio.ClientSession() as sess:
+                async with sess.get(url, allow_redirects=True) as resp:
+                    resp.raise_for_status()
+                    # Only read up to 64 MB for probing
+                    content = await resp.content.read(67_108_864)
+            with open(tmp_path, "wb") as fh:
+                fh.write(content)
+
+            summary = await get_inline_summary(tmp_path)
+            raw     = await get_mediainfo(tmp_path)
+
+            kb_rows: list = []
+            try:
+                tph_url = await post_to_telegraph(fname, raw)
+                kb_rows.append([InlineKeyboardButton("📋 MediaInfo complet →", url=tph_url)])
+            except Exception:
+                pass
+            kb_rows.append([InlineKeyboardButton("⏎ Retour", callback_data="sx_back")])
+
+            import shutil as _sh
+            _sh.rmtree(tmp_dir, ignore_errors=True)
+
+            await cq.message.edit_text(
+                summary,
+                reply_markup=InlineKeyboardMarkup(kb_rows)
+            )
+        except Exception as exc:
+            logging.error(f"[MediaInfo] {exc}")
+            await cq.message.edit_text(
+                "📊 <b>MEDIA INFO</b>\n"
+                "──────────────────\n\n"
+                f"❌ <b>Erreur :</b> <code>{exc}</code>",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⏎ Retour", callback_data="sx_back")
+                ]])
+            )
+        return
+
+    # ── Hardsub from URL ───────────────────────
+    if data == "hs_from_url":
+        url = (BOT.SOURCE or [None])[0]
+        if not url:
+            await cq.answer("Aucun URL trouvé.", show_alert=True); return
+        raw_name = url.split("/")[-1].split("?")[0]
+        import urllib.parse as _up
+        fname    = _up.unquote_plus(raw_name)[:50] or "video.mkv"
+        uid      = cq.from_user.id
+        await _hardsub_module.start_hardsub_for_url(client, cq.message, uid, url, fname)
+        return
+
+    # ── Settings ───────────────────────────────
     if data == "video":
         await cq.message.edit_text(
             "🎥 <b>PARAMÈTRES VIDÉO</b>\n"
