@@ -24,7 +24,7 @@ def load_credentials(path: Path = CREDENTIALS_PATH) -> dict:
     with path.open("r", encoding="utf-8") as f:
         creds = json.load(f)
 
-    required_keys = ["API_ID", "API_HASH", "BOT_TOKEN", "USER_ID", "DUMP_ID"]
+    required_keys = ["API_ID", "API_HASH", "BOT_TOKEN", "OWNER_ID", "DUMP_ID"]
     missing = [k for k in required_keys if k not in creds]
     if missing:
         raise KeyError(f"Missing keys in credentials.json: {missing}")
@@ -38,13 +38,10 @@ credentials = load_credentials()
 API_ID    = int(credentials["API_ID"])
 API_HASH  = str(credentials["API_HASH"])
 BOT_TOKEN = str(credentials["BOT_TOKEN"])
-OWNER     = int(credentials["USER_ID"])
+OWNER     = int(credentials["OWNER_ID"])
 DUMP_ID   = str(credentials["DUMP_ID"])
 
-# ── CloudConvert webhook (all optional) ───────────────────────
-# NGROK_TOKEN      — free token from ngrok.com; exposes the local webhook server
-# CC_WEBHOOK_SECRET — signing secret from CloudConvert's webhook settings page
-# CC_API_KEY        — API key(s) for /hardsub and /convert; comma-separated for rotation
+# ── CloudConvert webhook (all optional) ──────────────────────
 NGROK_TOKEN       = str(credentials.get("NGROK_TOKEN",       ""))
 CC_WEBHOOK_SECRET = str(credentials.get("CC_WEBHOOK_SECRET", ""))
 CC_API_KEY        = str(credentials.get("CC_API_KEY",        ""))
