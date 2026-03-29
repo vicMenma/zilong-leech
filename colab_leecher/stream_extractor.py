@@ -517,10 +517,16 @@ def kb_subs(session: dict) -> InlineKeyboardMarkup:
 # ─────────────────────────────────────────────────────────────
 
 def _ffmpeg_extract(url: str, stream_map: str, out_path: str) -> str:
-    """Extract one stream from `url` via ffmpeg (synchronous, run in executor)."""
+    """Extract one stream from `url` via ffmpeg (synchronous, run in executor).
+
+    NOTE: -allowed_extensions ALL is intentionally omitted — it is a format-specific
+    option only supported by the HLS demuxer in older ffmpeg (libavformat 58.x on
+    Colab). Using it as a global input option causes "Option not found" errors on
+    direct HTTP streams. For seedr.cc and other DDL links, plain ffmpeg stream copy
+    works fine without it.
+    """
     cmd = [
         "ffmpeg", "-y",
-        "-allowed_extensions", "ALL",
         "-analyzeduration", "20000000",
         "-probesize", "50000000",
         "-i", url,

@@ -212,11 +212,40 @@ async def stop_bot(client, message):
     await message.reply_text("🛑 <b>Arrêt en cours...</b> 👋")
     await sleep(2); await client.stop(); os._exit(0)
 
+
+
+# ── NEW: custom settings wrapper — adds channels button ──────────────────────
+async def _our_send_settings(client, msg, msg_id: int, is_new: bool) -> None:
+    """
+    Wrapper around send_settings that appends a 📢 Canaux button.
+    Calls the original helper first, then edits the reply markup to add our row.
+    """
+    await send_settings(client, msg, msg_id, is_new)
+    try:
+        # After send_settings edits/sends the message, fetch the current markup
+        # and append our channels button row
+        from colab_leecher.forward_channels import fwd_channels as _fc
+        ch_count = _fc.count()
+        ch_label = f"📢 Canaux ({ch_count})" if ch_count else "📢 Canaux"
+        existing_msg = await colab_bot.get_messages(msg.chat.id, msg_id)
+        if existing_msg and existing_msg.reply_markup:
+            kb = existing_msg.reply_markup.inline_keyboard
+            # Avoid double-adding if already present
+            if not any(
+                any("fwdch_settings" in (btn.callback_data or "") for btn in row)
+                for row in kb
+            ):
+                new_kb = list(kb) + [[InlineKeyboardButton(ch_label, callback_data="fwdch_settings")]]
+                await existing_msg.edit_reply_markup(InlineKeyboardMarkup(new_kb))
+    except Exception as _e:
+        pass  # Never break settings flow — channels button is cosmetic
+
+# ─────────────────────────────────────────────────────────────────────────────
 @colab_bot.on_message(filters.command("settings") & filters.private)
 async def settings(client, message):
     if _owner(message):
         await message.delete()
-        await send_settings(client, message, message.id, True)
+        await _our_send_settings(client, message, message.id, True)
 
 @colab_bot.on_message(filters.command("setname") & filters.private)
 async def custom_name(client, message):
@@ -231,11 +260,11 @@ async def custom_name(client, message):
 async def setFix(client, message):
     if BOT.State.prefix:
         BOT.Setting.prefix = message.text; BOT.State.prefix = False
-        await send_settings(client, message, message.reply_to_message_id, False)
+        await _our_send_settings(client, message, message.reply_to_message_id, False)
         await message.delete()
     elif BOT.State.suffix:
         BOT.Setting.suffix = message.text; BOT.State.suffix = False
-        await send_settings(client, message, message.reply_to_message_id, False)
+        await _our_send_settings(client, message, message.reply_to_message_id, False)
         await message.delete()
 
 # ── NEW: /botname ────────────────────────────────────────────
@@ -567,7 +596,7 @@ async def callbacks(client, cq):
             try: os.remove(Paths.THMB_PATH)
             except Exception: pass
         BOT.Setting.thumbnail = False
-        await send_settings(client, cq.message, cq.message.id, False)
+        await _our_send_settings(client, cq.message, cq.message.id, False)
     elif data == "set-prefix":
         await cq.message.edit_text("Réponds avec ton texte de <b>préfixe</b> :")
         BOT.State.prefix = True
@@ -576,26 +605,26 @@ async def callbacks(client, cq):
         BOT.State.suffix = True
     elif data in ["code-Monospace","p-Regular","b-Bold","i-Italic","u-Underlined"]:
         r = data.split("-"); BOT.Options.caption = r[0]; BOT.Setting.caption = r[1]
-        await send_settings(client, cq.message, cq.message.id, False)
+        await _our_send_settings(client, cq.message, cq.message.id, False)
     elif data in ["split-true","split-false"]:
         BOT.Options.is_split    = data == "split-true"
         BOT.Setting.split_video = "Découpé" if data == "split-true" else "Zippé"
-        await send_settings(client, cq.message, cq.message.id, False)
+        await _our_send_settings(client, cq.message, cq.message.id, False)
     elif data in ["convert-true","convert-false","mp4","mkv","q-High","q-Low"]:
         if   data == "convert-true":  BOT.Options.convert_video = True;  BOT.Setting.convert_video = "Oui"
         elif data == "convert-false": BOT.Options.convert_video = False; BOT.Setting.convert_video = "Non"
         elif data == "q-High": BOT.Setting.convert_quality = "Haute"; BOT.Options.convert_quality = True
         elif data == "q-Low":  BOT.Setting.convert_quality = "Basse"; BOT.Options.convert_quality = False
         else: BOT.Options.video_out = data
-        await send_settings(client, cq.message, cq.message.id, False)
+        await _our_send_settings(client, cq.message, cq.message.id, False)
     elif data in ["media","document"]:
         BOT.Options.stream_upload = data == "media"
         BOT.Setting.stream_upload = "Média" if data == "media" else "Document"
-        await send_settings(client, cq.message, cq.message.id, False)
+        await _our_send_settings(client, cq.message, cq.message.id, False)
     elif data == "close":
         await cq.message.delete()
     elif data == "back":
-        await send_settings(client, cq.message, cq.message.id, False)
+        await _our_send_settings(client, cq.message, cq.message.id, False)
     elif data == "cancel":
         await cancelTask("Annulé par l'utilisateur")
 
@@ -881,7 +910,7 @@ async def _main():
     logging.info("💓 Heartbeat started (every 5 min)")
     # ─────────────────────────────────────────────────────────
 
-    async def _delete_confirm_after(msg, delay: float = 3.0):
+    async def _delete_confirm_after(msg, delay: float = 30.0):
         """Delete the confirmation message `delay` seconds after next msg is sent."""
         if not msg:
             return
@@ -905,7 +934,7 @@ async def _main():
                     f"<i>Event to subscribe: <b>job.finished</b></i>",
                 )
                 # Message 3 just sent → delete confirmation after 3 s
-                asyncio.create_task(_delete_confirm_after(confirm_msg, 3.0))
+                asyncio.create_task(_delete_confirm_after(confirm_msg, 30.0))
                 confirm_msg = None
             else:
                 logging.info("☁️  CC webhook server on localhost only.")
@@ -924,7 +953,7 @@ async def _main():
     # If confirmation msg was not yet deleted (no webhook message sent),
     # delete it now — it will disappear right as the bot goes ready.
     if confirm_msg:
-        asyncio.create_task(_delete_confirm_after(confirm_msg, 3.0))
+        asyncio.create_task(_delete_confirm_after(confirm_msg, 30.0))
 
     await idle()
 
