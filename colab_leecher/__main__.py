@@ -621,14 +621,18 @@ async def _heartbeat_task():
 
 
 # ── NEW: Bot name first-run prompt ───────────────────────────
-async def _ask_bot_name() -> None:
+async def _ask_bot_name():
     """
-    Send the bot-name prompt and WAIT for the owner to reply before
-    the rest of _main() continues.  Uses an asyncio.Event so we
-    don't need a fragile one-shot handler approach.
+    Send the bot-name prompt, wait for a reply, then:
+      • Delete the prompt message immediately when the name is received.
+      • Delete the user's own reply immediately.
+      • Send the confirmation and return it so _main() can delete it
+        3 seconds after the next bot message is sent.
+    Returns the confirmation Message object.
     """
-    answered = asyncio.Event()
-    chosen   = [None]
+    answered  = asyncio.Event()
+    chosen    = [None]
+    user_msg  = [None]
 
     @colab_bot.on_message(
         filters.private & filters.text & filters.user(OWNER),
@@ -638,11 +642,13 @@ async def _ask_bot_name() -> None:
         name = msg.text.strip()
         if not name or name.startswith("/"):
             return
-        chosen[0] = name
+        chosen[0]   = name
+        user_msg[0] = msg
         answered.set()
         msg.stop_propagation()
 
-    await colab_bot.send_message(
+    # Message 1 — prompt
+    prompt_msg = await colab_bot.send_message(
         OWNER,
         "👋 <b>Bienvenue !</b>\n\n"
         "C'est la première fois que ce bot démarre.\n\n"
@@ -663,15 +669,28 @@ async def _ask_bot_name() -> None:
     except Exception:
         pass
 
+    # Delete prompt + user reply immediately
+    try:
+        await prompt_msg.delete()
+    except Exception:
+        pass
+    try:
+        if user_msg[0]:
+            await user_msg[0].delete()
+    except Exception:
+        pass
+
     name = (chosen[0] or "Zilong").strip()
     set_bot_name(name)
 
-    await colab_bot.send_message(
+    # Message 2 — confirmation (returned so _main schedules its deletion)
+    confirm_msg = await colab_bot.send_message(
         OWNER,
         f"✅ <b>Parfait !</b> Le bot s'appellera <b>{name.upper()} BOT</b>\n\n"
         "Tu peux le changer à tout moment avec /botname.\n\n"
         "🟢 <i>Démarrage en cours…</i>",
     )
+    return confirm_msg
 # ─────────────────────────────────────────────────────────────
 
 
@@ -685,8 +704,9 @@ async def _main():
     # ── NEW: bot name prompt — MUST be first ─────────────────
     # This runs BEFORE webhook, BEFORE poller, BEFORE idle.
     # If already configured, skip silently.
+    confirm_msg = None
     if not is_name_configured():
-        await _ask_bot_name()
+        confirm_msg = await _ask_bot_name()
     bot_name = get_bot_name().upper()
     logging.info("🤖 Bot name: %s", bot_name)
     # ──────────────────────────────────────────────────────────
@@ -695,6 +715,16 @@ async def _main():
     asyncio.create_task(_heartbeat_task())
     logging.info("💓 Heartbeat started (every 5 min)")
     # ─────────────────────────────────────────────────────────
+
+    async def _delete_confirm_after(msg, delay: float = 3.0):
+        """Delete the confirmation message `delay` seconds after next msg is sent."""
+        if not msg:
+            return
+        await asyncio.sleep(delay)
+        try:
+            await msg.delete()
+        except Exception:
+            pass
 
     # ── CloudConvert webhook (optional) ──────────────────────
     if NGROK_TOKEN or CC_WEBHOOK_SECRET:
@@ -709,6 +739,9 @@ async def _main():
                     f"☁️ <b>CloudConvert Webhook Active</b>\n\n"
                     f"<i>Event to subscribe: <b>job.finished</b></i>",
                 )
+                # Message 3 just sent → delete confirmation after 3 s
+                asyncio.create_task(_delete_confirm_after(confirm_msg, 3.0))
+                confirm_msg = None
             else:
                 logging.info("☁️  CC webhook server on localhost only.")
         except Exception as exc:
@@ -722,6 +755,11 @@ async def _main():
         _ccstatus_module.ensure_poller()
         logging.info("📡 CC poller started")
     # ─────────────────────────────────────────────────────────
+
+    # If confirmation msg was not yet deleted (no webhook message sent),
+    # delete it now — it will disappear right as the bot goes ready.
+    if confirm_msg:
+        asyncio.create_task(_delete_confirm_after(confirm_msg, 3.0))
 
     await idle()
 
