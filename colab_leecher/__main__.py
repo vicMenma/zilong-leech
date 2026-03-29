@@ -472,27 +472,27 @@ async def callbacks(client, cq):
         url = (BOT.SOURCE or [None])[0]
         if not url:
             await cq.answer("Aucun URL trouvé.", show_alert=True); return
+
+        # Extract a clean filename from the URL for display / Telegraph title
+        import urllib.parse as _up
+        _raw_fname = url.split("/")[-1].split("?")[0]
+        fname = _up.unquote_plus(_raw_fname)[:60] or "media"
+
         await cq.message.edit_text(
             "📊 <b>MEDIA INFO</b>\n──────────────────\n\n"
-            "⏳ <i>Téléchargement et analyse en cours...</i>\n"
+            "⏳ <i>Analyse en cours...</i>\n"
             f"<code>{url[:70]}{'…' if len(url) > 70 else ''}</code>"
         )
         try:
             from colab_leecher.media_info import get_inline_summary, get_mediainfo, post_to_telegraph
-            import tempfile as _tf, aiohttp as _aio, shutil as _sh
-            _mi_base = getattr(Paths, "WORK_PATH", "/tmp")
-            os.makedirs(_mi_base, exist_ok=True)
-            tmp_dir  = _tf.mkdtemp(prefix="mi_", dir=_mi_base)
-            fname    = url.split("/")[-1].split("?")[0][:60] or "media"
-            tmp_path = os.path.join(tmp_dir, fname)
-            async with _aio.ClientSession() as sess:
-                async with sess.get(url, allow_redirects=True) as resp:
-                    resp.raise_for_status()
-                    content = await resp.content.read(67_108_864)
-            with open(tmp_path, "wb") as fh:
-                fh.write(content)
-            summary = await get_inline_summary(tmp_path)
-            raw     = await get_mediainfo(tmp_path)
+
+            # Run ffprobe / mediainfo DIRECTLY on the URL — no download needed.
+            # This is the same strategy as stream extractor and always works,
+            # even for large files where downloading 64 MB gives a truncated MKV
+            # that ffprobe cannot parse.
+            summary = await get_inline_summary(url)
+            raw     = await get_mediainfo(url)
+
             kb_rows: list = []
             try:
                 tph_url = await post_to_telegraph(fname, raw)
@@ -500,7 +500,6 @@ async def callbacks(client, cq):
             except Exception:
                 pass
             kb_rows.append([InlineKeyboardButton("⏎ Retour", callback_data="sx_back")])
-            _sh.rmtree(tmp_dir, ignore_errors=True)
             await cq.message.edit_text(summary, reply_markup=InlineKeyboardMarkup(kb_rows))
         except Exception as exc:
             logging.error(f"[MediaInfo] {exc}")

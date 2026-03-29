@@ -144,6 +144,9 @@ async def get_mediainfo(path: str) -> str:
 async def _ffprobe_mediainfo_text(path: str) -> str:
     cmd = [
         "ffprobe", "-v", "quiet",
+        "-allowed_extensions", "ALL",
+        "-analyzeduration", "20000000",
+        "-probesize", "50000000",
         "-print_format", "json",
         "-show_format", "-show_streams",
         path,
@@ -237,6 +240,9 @@ async def get_inline_summary(path: str) -> str:
     """Short HTML summary for inline display in Telegram."""
     cmd = [
         "ffprobe", "-v", "quiet",
+        "-allowed_extensions", "ALL",
+        "-analyzeduration", "20000000",
+        "-probesize", "50000000",
         "-print_format", "json",
         "-show_format", "-show_streams",
         path,
@@ -247,7 +253,7 @@ async def get_inline_summary(path: str) -> str:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        out, _ = await proc.communicate()
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
         if proc.returncode != 0 or not out.strip():
             return "❌ <i>ffprobe failed — cannot read file.</i>"
         data = json.loads(out.decode(errors="replace"))
