@@ -73,11 +73,14 @@ async def _show_sx_type_menu(msg, session: dict) -> None:
 # ──────────────────────────────────────────────
 @colab_bot.on_message(filters.command("start") & filters.private)
 async def start(client, message):
+    # Read before delete so user info is still accessible
+    user_name = message.from_user.first_name or "toi"
     await message.delete()
-    bot_name = get_bot_name().upper()   # ── NEW
+    bot_name = get_bot_name().upper()
     await message.reply_text(
         f"⚡ <b>{bot_name} BOT</b>\n"
         "──────────────────\n"
+        f"👋 Bonjour <b>{user_name}</b> !\n"
         "🟢 Online &amp; Ready\n\n"
         "Envoie un <b>lien</b>, <b>magnet</b> ou <b>chemin</b>.\n"
         "💡 /help pour les commandes",
