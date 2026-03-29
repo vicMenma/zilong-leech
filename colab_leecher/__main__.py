@@ -480,7 +480,9 @@ async def callbacks(client, cq):
         try:
             from colab_leecher.media_info import get_inline_summary, get_mediainfo, post_to_telegraph
             import tempfile as _tf, aiohttp as _aio, shutil as _sh
-            tmp_dir  = _tf.mkdtemp(prefix="mi_", dir=getattr(Paths, "WORK_PATH", "/tmp"))
+            _mi_base = getattr(Paths, "WORK_PATH", "/tmp")
+            os.makedirs(_mi_base, exist_ok=True)
+            tmp_dir  = _tf.mkdtemp(prefix="mi_", dir=_mi_base)
             fname    = url.split("/")[-1].split("?")[0][:60] or "media"
             tmp_path = os.path.join(tmp_dir, fname)
             async with _aio.ClientSession() as sess:

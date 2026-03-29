@@ -477,12 +477,13 @@ def clear_session(chat_id: int) -> None:
 # ─────────────────────────────────────────────────────────────
 
 def kb_type(v: int, a: int, s: int) -> InlineKeyboardMarkup:
-    rows = []
-    if v: rows.append([InlineKeyboardButton(f"🎬 Vidéo  ({v})",       callback_data="sx_video")])
-    if a: rows.append([InlineKeyboardButton(f"🎵 Audio  ({a})",       callback_data="sx_audio")])
-    if s: rows.append([InlineKeyboardButton(f"💬 Sous-titres  ({s})", callback_data="sx_subs")])
-    rows.append([InlineKeyboardButton("⏎ Retour", callback_data="sx_back")])
-    return InlineKeyboardMarkup(rows)
+    # Video and Audio side by side on the same row (compact, matches multiusage)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🎬 Vidéo  ({v})",       callback_data="sx_video"),
+         InlineKeyboardButton(f"🎵 Audio  ({a})",       callback_data="sx_audio")],
+        [InlineKeyboardButton(f"💬 Sous-titres  ({s})", callback_data="sx_subs")],
+        [InlineKeyboardButton("⏎ Retour",               callback_data="sx_back")],
+    ])
 
 
 def kb_video(session: dict) -> InlineKeyboardMarkup:

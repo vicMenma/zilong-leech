@@ -3,17 +3,9 @@ colab_leecher/hardsub.py
 ────────────────────────────────────────────────────────────────
 /hardsub command — CloudConvert-powered subtitle burning.
 
-Flow:
-  1. /hardsub  — bot asks for a video (file, URL, or magnet)
-  2. User sends video  — stored in per-user state
-     (multiple videos can be queued; each gets the same subtitle)
-  3. User sends subtitle (.ass / .srt / .vtt / .txt) or a URL to one
-  4. Bot submits all jobs to CloudConvert and reports job IDs
-  5. When CC finishes, the cloudconvert_hook auto-delivers the result
-
-/convert — same idea but without a subtitle (resolution / format change).
-
-Both commands require CC_API_KEY in credentials.json.
+FIX: _make_tmp now calls os.makedirs(base, exist_ok=True) before
+     tempfile.mkdtemp so it works even when WORK_PATH has not been
+     created yet (i.e. no leech task has run in this session).
 """
 from __future__ import annotations
 
@@ -53,7 +45,9 @@ def _clear(uid: int) -> None:
 
 def _make_tmp(uid: int) -> str:
     base = getattr(Paths, "WORK_PATH", "/tmp")
-    tmp  = tempfile.mkdtemp(prefix=f"hardsub_{uid}_", dir=base)
+    # FIX: ensure the parent directory exists before calling mkdtemp
+    os.makedirs(base, exist_ok=True)
+    tmp = tempfile.mkdtemp(prefix=f"hardsub_{uid}_", dir=base)
     return tmp
 
 
@@ -123,6 +117,18 @@ async def _submit_one_job(
             output_name=output_name,
             scale_height=0,
         )
+        # Register job in CC job store for /ccstatus tracking
+        try:
+            from colab_leecher.cc_job_store import cc_job_store, CCJob
+            from colab_leecher.ccstatus import ensure_poller
+            job = CCJob(
+                job_id=job_id, uid=uid, fname=video_fname,
+                sub_fname=sub_fname, output_name=output_name, status="processing",
+            )
+            await cc_job_store.add(job)
+            ensure_poller()
+        except Exception as e:
+            log.warning("[Hardsub] Could not register job in store: %s", e)
         return video_fname, job_id, True
     except Exception as exc:
         log.error("[Hardsub] Job failed for %s: %s", video_fname, exc)
@@ -177,7 +183,8 @@ async def _submit_batch(st, state: dict, uid: int) -> None:
         f"{result_text}\n\n"
         f"💬 <code>{sub_fname[:38]}</code>\n\n"
         "⏳ <i>CloudConvert traite…\n"
-        "Le webhook livrera le résultat automatiquement.</i>",
+        "Utilise /ccstatus pour suivre la progression.\n"
+        "Le résultat sera livré automatiquement.</i>",
     )
 
     log.info("[Hardsub] Batch: %d/%d jobs submitted for uid=%d", ok_count, count, uid)
@@ -242,7 +249,7 @@ async def cmd_hardsub(client, msg: Message):
 
 
 # ─────────────────────────────────────────────────────────────
-# /cancel — hardsub-specific override (group 4 so it runs first)
+# /cancel — hardsub-specific override
 # ─────────────────────────────────────────────────────────────
 
 @colab_bot.on_message(filters.command("cancel") & filters.private, group=4)
@@ -321,9 +328,7 @@ async def hardsub_video_file(client, msg: Message):
         return
 
     fsize = getattr(media, "file_size", 0) or 0
-    st    = await msg.reply(
-        f"⬇️ Téléchargement <code>{fname[:40]}</code>…",
-    )
+    st    = await msg.reply(f"⬇️ Téléchargement <code>{fname[:40]}</code>…")
 
     try:
         path = await client.download_media(
@@ -344,13 +349,13 @@ async def hardsub_video_file(client, msg: Message):
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 1 — receive video URL  /  Step 2b — receive subtitle URL
+# Step 1 — receive video URL / Step 2b — receive subtitle URL
 # ─────────────────────────────────────────────────────────────
 
 @colab_bot.on_message(
     filters.private & filters.text & ~filters.command(
         ["start", "help", "settings", "stats", "ping",
-         "cancel", "stop", "setname", "hardsub"]
+         "cancel", "stop", "setname", "hardsub", "ccstatus", "convert", "botname"]
     ),
     group=1,
 )
@@ -367,13 +372,11 @@ async def hardsub_url_or_sub_url(client, msg: Message):
     if not url_re.match(text):
         return
 
-    # ── Subtitle URL ──────────────────────────────────────────
     if state["step"] == "waiting_subtitle":
         await _handle_subtitle_url(msg, state, text, uid)
         msg.stop_propagation()
         return
 
-    # ── Video URL ─────────────────────────────────────────────
     raw_name = text.split("/")[-1].split("?")[0]
     fname    = _urlparse.unquote_plus(raw_name)[:50] or "video.mkv"
     state["videos"].append({"path": None, "url": text, "fname": fname})
@@ -454,7 +457,6 @@ async def _handle_subtitle_url(msg: Message, state: dict, url: str, uid: int) ->
             async with sess.get(url, headers={"User-Agent": "Mozilla/5.0"},
                                 allow_redirects=True) as resp:
                 resp.raise_for_status()
-                # Honour Content-Disposition filename if available
                 cd = resp.headers.get("Content-Disposition", "")
                 if "filename=" in cd:
                     cd_fname = cd.split("filename=")[-1].strip().strip('"').strip("'")
