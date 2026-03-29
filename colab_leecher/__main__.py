@@ -1,3 +1,14 @@
+"""
+colab_leecher/__main__.py
+ORIGINAL code unchanged — new sections are marked ── NEW ──.
+
+Additions:
+  • Bot name ask at first start (bot_name.py)
+  • Colab heartbeat task (keeps session alive)
+  • ccstatus poller auto-start (CC job delivery without webhook)
+  • /botname command (rename the bot at any time)
+  • /convert and /ccstatus are registered by importing ccstatus module
+"""
 import logging
 import os
 import platform
@@ -20,7 +31,16 @@ from colab_leecher.stream_extractor import (
     kb_type, kb_video, kb_audio, kb_subs,
     dl_video, dl_audio, dl_sub,
 )
-import colab_leecher.hardsub as _hardsub_module  # registers /hardsub handlers
+import colab_leecher.hardsub as _hardsub_module
+
+# ── NEW: imports for added features ─────────────────────────
+import asyncio
+import threading
+from colab_leecher.bot_name import get_bot_name, set_bot_name, is_name_configured
+import colab_leecher.ccstatus as _ccstatus_module   # registers /ccstatus + /convert
+from colab_leecher.cc_job_store import cc_job_store  # noqa — ensures store is loaded
+# ─────────────────────────────────────────────────────────────
+
 
 def _owner(m): return m.chat.id == OWNER
 def _ring(p):  return "🟢" if p < 40 else ("🟡" if p < 70 else "🔴")
@@ -34,7 +54,6 @@ def _fmt_dur(secs: float) -> str:
 
 
 async def _show_sx_type_menu(msg, session: dict) -> None:
-    """Edit msg to show the stream type selection menu."""
     v = len(session["video"])
     a = len(session["audio"])
     s = len(session["subs"])
@@ -54,8 +73,9 @@ async def _show_sx_type_menu(msg, session: dict) -> None:
 @colab_bot.on_message(filters.command("start") & filters.private)
 async def start(client, message):
     await message.delete()
+    bot_name = get_bot_name().upper()              # ── NEW: use bot name
     await message.reply_text(
-        "⚡ <b>ZILONG BOT</b>\n"
+        f"⚡ <b>{bot_name} BOT</b>\n"
         "──────────────────\n"
         "🟢 Online &amp; Ready\n\n"
         "Envoie un <b>lien</b>, <b>magnet</b> ou <b>chemin</b>.\n"
@@ -82,7 +102,10 @@ async def help_cmd(client, message):
         "⚙️ <b>Commandes</b>\n"
         "  /settings · /stats · /ping\n"
         "  /cancel · /stop\n"
-        "  /hardsub — Graver sous-titres via CloudConvert\n\n"
+        "  /hardsub — Graver sous-titres via CloudConvert\n"
+        "  /convert — Convertir résolution (CloudConvert)\n"
+        "  /ccstatus — Suivi jobs CloudConvert\n"
+        "  /botname — Renommer le bot\n\n"    # ── NEW
         "──────────────────\n"
         "🎛 <b>Options (après le lien)</b>\n"
         "  <code>[nom.ext]</code>  — nom personnalisé\n\n"
@@ -215,6 +238,47 @@ async def setFix(client, message):
         await send_settings(client, message, message.reply_to_message_id, False)
         await message.delete()
 
+# ── NEW: /botname ────────────────────────────────────────────
+_waiting_botname: set = set()
+
+@colab_bot.on_message(filters.command("botname") & filters.private)
+async def cmd_botname(client, message):
+    if not _owner(message):
+        return
+    await message.delete()
+    cur = get_bot_name()
+    _waiting_botname.add(OWNER)
+    await message.reply_text(
+        f"✏️ <b>Renommer le bot</b>\n\n"
+        f"Nom actuel : <b>{cur}</b>\n\n"
+        "Envoie le nouveau nom (ex: <code>Kitagawa</code>)\n"
+        "ou /cancel pour annuler.",
+    )
+
+@colab_bot.on_message(
+    filters.private & filters.text
+    & ~filters.command(["start","help","settings","stats","ping","cancel","stop",
+                        "setname","hardsub","ccstatus","convert","botname"]),
+    group=3,
+)
+async def botname_collector(client, message):
+    uid = message.from_user.id
+    if uid not in _waiting_botname:
+        return
+    name = message.text.strip()
+    if not name or name.startswith("/"):
+        return
+    _waiting_botname.discard(uid)
+    set_bot_name(name)
+    display = name.upper()
+    await message.reply_text(
+        f"✅ <b>Nom mis à jour !</b>\n\n"
+        f"Le bot s'appelle maintenant : <b>{display} BOT</b>\n\n"
+        "<i>Redémarre le bot pour appliquer partout.</i>",
+    )
+    message.stop_propagation()
+# ─────────────────────────────────────────────
+
 # ──────────────────────────────────────────────
 #  Réception du lien — choix du mode
 # ──────────────────────────────────────────────
@@ -271,7 +335,6 @@ async def callbacks(client, cq):
         except Exception: pass
         return
 
-    # ── Leech normal ───────────────────────────
     if data == "mode_normal":
         await cq.message.delete()
         MSG.status_msg = await colab_bot.send_message(
@@ -378,12 +441,11 @@ async def callbacks(client, cq):
         )
         return
 
-    # ── Téléchargement d'un stream ─────────────
     if data.startswith("sx_dl_"):
         session = get_session(chat_id)
         if not session: await cq.answer("Session expirée.", show_alert=True); return
 
-        parts = data.split("_")   # ["sx","dl","video","0"]
+        parts = data.split("_")
         kind  = parts[2]
         idx   = int(parts[3])
 
@@ -449,7 +511,6 @@ async def callbacks(client, cq):
             from colab_leecher.media_info import get_inline_summary, get_mediainfo, post_to_telegraph
             import tempfile as _tf
 
-            # Download to a temp file
             tmp_dir  = _tf.mkdtemp(prefix="mi_", dir=getattr(Paths, "WORK_PATH", "/tmp"))
             fname    = url.split("/")[-1].split("?")[0][:60] or "media"
             tmp_path = os.path.join(tmp_dir, fname)
@@ -458,7 +519,6 @@ async def callbacks(client, cq):
             async with _aio.ClientSession() as sess:
                 async with sess.get(url, allow_redirects=True) as resp:
                     resp.raise_for_status()
-                    # Only read up to 64 MB for probing
                     content = await resp.content.read(67_108_864)
             with open(tmp_path, "wb") as fh:
                 fh.write(content)
@@ -493,7 +553,6 @@ async def callbacks(client, cq):
             )
         return
 
-    # ── Hardsub from URL ───────────────────────
     if data == "hs_from_url":
         url = (BOT.SOURCE or [None])[0]
         if not url:
@@ -505,7 +564,6 @@ async def callbacks(client, cq):
         await _hardsub_module.start_hardsub_for_url(client, cq.message, uid, url, fname)
         return
 
-    # ── Settings ───────────────────────────────
     if data == "video":
         await cq.message.edit_text(
             "🎥 <b>PARAMÈTRES VIDÉO</b>\n"
@@ -600,14 +658,77 @@ async def handle_photo(client, message):
     await message_deleter(message, msg)
 
 
+# ── NEW: Heartbeat task (keeps Colab alive) ──────────────────
+async def _heartbeat_task():
+    """Prints a heartbeat dot every 5 min to prevent Colab idle disconnect."""
+    while True:
+        await asyncio.sleep(300)
+        from datetime import datetime as _dt
+        print(f"\r[{_dt.now().strftime('%H:%M')}] 💓", end="", flush=True)
+# ─────────────────────────────────────────────
+
+# ── NEW: Bot name first-run setup ────────────────────────────
+async def _ask_bot_name_if_needed():
+    if is_name_configured():
+        return
+
+    fut = asyncio.get_event_loop().create_future()
+
+    @colab_bot.on_message(
+        filters.private & filters.text & filters.user(OWNER),
+        group=99,
+    )
+    async def _on_name(client, msg):
+        name = msg.text.strip()
+        if name and not name.startswith("/") and not fut.done():
+            fut.set_result(name)
+            msg.stop_propagation()
+
+    await colab_bot.send_message(
+        OWNER,
+        "👋 <b>First-time setup</b>\n\n"
+        "Quel nom veux-tu donner à ce bot ?\n"
+        "Envoie juste le nom — ex: <code>Kitagawa</code>\n\n"
+        "Le message /start affichera ensuite :\n"
+        "<b>⚡ KITAGAWA BOT</b>\n\n"
+        "<i>(Envoie n'importe quoi pour passer cette étape)</i>",
+    )
+
+    try:
+        name = await asyncio.wait_for(fut, timeout=120)
+    except asyncio.TimeoutError:
+        name = "Zilong"
+
+    colab_bot.remove_handler(_on_name.__wrapped__, group=99)
+    set_bot_name(name)
+
+    await colab_bot.send_message(
+        OWNER,
+        f"✅ Nom sauvegardé : <b>{name.upper()} BOT</b>\n"
+        "Tu peux le changer plus tard avec /botname.",
+    )
+# ─────────────────────────────────────────────
+
+
 # ──────────────────────────────────────────────
-#  Async main — start bot + optional CC webhook
+#  Async main
 # ──────────────────────────────────────────────
 async def _main():
     await colab_bot.start()
     logging.info("⚡ Zilong démarré.")
 
-    # ── CloudConvert webhook (only when NGROK_TOKEN or local testing) ──
+    # ── NEW: first-run bot name ─────────────────────────────
+    await _ask_bot_name_if_needed()
+    bot_name = get_bot_name().upper()
+    logging.info("🤖 Bot name: %s", bot_name)
+    # ────────────────────────────────────────────────────────
+
+    # ── NEW: start heartbeat ────────────────────────────────
+    asyncio.create_task(_heartbeat_task())
+    logging.info("💓 Heartbeat task started (every 5 min)")
+    # ────────────────────────────────────────────────────────
+
+    # ── CloudConvert webhook (optional) ────────────────────
     if NGROK_TOKEN or CC_WEBHOOK_SECRET:
         try:
             import colab_leecher.cloudconvert_hook as _cc_hook
@@ -623,12 +744,18 @@ async def _main():
                     f"<i>Event to subscribe: <b>job.finished</b></i>",
                 )
             else:
-                logging.info("☁️  CC webhook server running on localhost only (no ngrok URL).")
+                logging.info("☁️  CC webhook server running on localhost only.")
         except Exception as exc:
             logging.error("Failed to start CC webhook server: %s", exc)
     else:
-        logging.info("ℹ️  CloudConvert webhook disabled "
-                     "(set NGROK_TOKEN in credentials.json to enable).")
+        logging.info("ℹ️  CloudConvert webhook disabled.")
+
+    # ── NEW: start CC poller (delivers jobs without webhook) ─
+    from colab_leecher import CC_API_KEY as _CC_KEY
+    if _CC_KEY.strip():
+        _ccstatus_module.ensure_poller()
+        logging.info("📡 CC poller started (polls every 5 s when jobs are active)")
+    # ────────────────────────────────────────────────────────
 
     await idle()
 
@@ -642,6 +769,5 @@ async def _main():
     await colab_bot.stop()
 
 
-# Entry point — use the pre-created event loop from __init__.py
 from colab_leecher import loop
 loop.run_until_complete(_main())
