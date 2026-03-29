@@ -152,7 +152,6 @@ async def _ffprobe_url(url: str) -> Optional[dict]:
     """Run ffprobe async on a URL. Returns JSON dict or None."""
     cmd = [
         "ffprobe", "-v", "quiet",
-        "-allowed_extensions", "ALL",
         "-analyzeduration", "20000000",
         "-probesize", "50000000",
         "-print_format", "json",

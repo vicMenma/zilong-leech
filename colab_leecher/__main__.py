@@ -40,6 +40,7 @@ import asyncio
 from colab_leecher.bot_name import get_bot_name, set_bot_name, is_name_configured
 import colab_leecher.ccstatus as _ccstatus_module     # registers /ccstatus + /convert
 from colab_leecher.cc_job_store import cc_job_store   # noqa — loads store on import
+from colab_leecher.forward_channels import fwd_channels  # NEW — auto-forward channels
 # ─────────────────────────────────────────────────────────────
 
 
@@ -612,6 +613,169 @@ async def handle_photo(client, message):
     await sleep(10)
     await message_deleter(message, msg)
 
+
+
+# ── NEW: /channels — forward channel management ──────────────
+_waiting_channel_add: set = set()   # uids waiting to type a channel
+
+
+def _channels_kb(channels: list) -> "InlineKeyboardMarkup":
+    rows = []
+    for i, ch in enumerate(channels):
+        name = ch.get("name", str(ch["id"]))[:30]
+        rows.append([
+            InlineKeyboardButton(f"📢 {name}", callback_data=f"fwdch|info|{i}"),
+            InlineKeyboardButton("🗑 Retirer",  callback_data=f"fwdch|del|{i}"),
+        ])
+    rows.append([InlineKeyboardButton("➕ Ajouter un canal",  callback_data="fwdch|add")])
+    rows.append([InlineKeyboardButton("✖ Fermer",             callback_data="fwdch|close")])
+    return InlineKeyboardMarkup(rows)
+
+
+def _channels_text(channels: list) -> str:
+    if not channels:
+        body = "  <i>Aucun canal configuré.</i>"
+    else:
+        body = "\n".join(
+            f"  {i+1}. 📢 <b>{ch.get('name', str(ch['id']))}</b>  <code>{ch['id']}</code>"
+            for i, ch in enumerate(channels)
+        )
+    return (
+        "📢 <b>CANAUX DE TRANSFERT</b>\n"
+        "──────────────────────\n\n"
+        f"{body}\n\n"
+        "<i>Les fichiers livrés (hardsub, leech) sont automatiquement\n"
+        "copiés dans ces canaux après chaque upload.</i>\n\n"
+        "<i>Le bot doit être <b>admin</b> dans le canal cible.</i>"
+    )
+
+
+@colab_bot.on_message(filters.command("channels") & filters.private)
+async def cmd_channels(client, message):
+    if not _owner(message): return
+    await message.delete()
+    channels = fwd_channels.all()
+    await colab_bot.send_message(
+        OWNER,
+        _channels_text(channels),
+        reply_markup=_channels_kb(channels),
+    )
+
+
+@colab_bot.on_callback_query(filters.regex(r"^fwdch\|"))
+async def fwdch_cb(client, cb: "CallbackQuery"):
+    if cb.from_user.id != OWNER:
+        return await cb.answer("Accès refusé.", show_alert=True)
+    parts  = cb.data.split("|")
+    action = parts[1]
+    await cb.answer()
+
+    if action == "close":
+        _waiting_channel_add.discard(OWNER)
+        try:
+            await cb.message.delete()
+        except Exception:
+            pass
+        return
+
+    if action == "add":
+        _waiting_channel_add.add(OWNER)
+        await cb.message.edit_text(
+            "➕ <b>Ajouter un canal</b>\n\n"
+            "Envoie l\'<b>identifiant</b> ou le <b>@username</b> du canal :\n\n"
+            "  • <code>@mon_canal</code>\n"
+            "  • <code>-1001234567890</code>\n\n"
+            "<i>Le bot doit être admin dans ce canal.\n"
+            "Envoie /cancel pour annuler.</i>",
+        )
+        return
+
+    if action == "del":
+        try:
+            idx = int(parts[2])
+            channels = fwd_channels.all()
+            if 0 <= idx < len(channels):
+                ch = channels[idx]
+                await fwd_channels.remove(ch["id"])
+                await cb.answer(f"✅ {ch.get('name', ch['id'])} retiré", show_alert=True)
+        except Exception as exc:
+            await cb.answer(f"Erreur: {exc}", show_alert=True)
+        channels = fwd_channels.all()
+        try:
+            await cb.message.edit_text(
+                _channels_text(channels),
+                reply_markup=_channels_kb(channels),
+            )
+        except Exception:
+            pass
+        return
+
+    if action == "info":
+        try:
+            idx = int(parts[2])
+            ch  = fwd_channels.all()[idx]
+            await cb.answer(f"ID: {ch['id']}", show_alert=True)
+        except Exception:
+            pass
+        return
+
+
+@colab_bot.on_message(
+    filters.private & filters.text
+    & ~filters.command(["start", "help", "settings", "stats", "ping", "cancel", "stop",
+                        "setname", "hardsub", "ccstatus", "convert", "botname", "channels"]),
+    group=3,
+)
+async def channel_input_receiver(client, msg):
+    """Receive channel ID/username when user is in the 'add channel' state."""
+    uid = msg.from_user.id
+    if uid != OWNER or uid not in _waiting_channel_add:
+        return
+    text = msg.text.strip()
+    if text.lower() == "/cancel":
+        _waiting_channel_add.discard(uid)
+        await msg.reply("❌ Annulé.")
+        msg.stop_propagation()
+        return
+    if not (text.startswith("@") or text.lstrip("-").isdigit()):
+        return   # not a channel identifier — let other handlers deal with it
+
+    await msg.delete()
+    _waiting_channel_add.discard(uid)
+
+    try:
+        if text.lstrip("-").isdigit():
+            target = int(text)
+        else:
+            target = text if text.startswith("@") else f"@{text}"
+        chat   = await colab_bot.get_chat(target)
+        ch_id  = chat.id
+        ch_name = chat.title or chat.username or str(ch_id)
+
+        added = await fwd_channels.add(ch_id, ch_name)
+        if added:
+            await colab_bot.send_message(
+                OWNER,
+                f"✅ <b>{ch_name}</b> ajouté !\n\n"
+                f"ID : <code>{ch_id}</code>\n"
+                f"Total : <b>{fwd_channels.count()}</b> canal(aux)",
+                reply_markup=_channels_kb(fwd_channels.all()),
+            )
+        else:
+            await colab_bot.send_message(
+                OWNER,
+                f"⚠️ <b>{ch_name}</b> est déjà dans la liste.",
+                reply_markup=_channels_kb(fwd_channels.all()),
+            )
+    except Exception as exc:
+        await colab_bot.send_message(
+            OWNER,
+            f"❌ <b>Impossible de trouver le canal</b>\n\n"
+            f"<code>{exc}</code>\n\n"
+            f"<i>Vérifie que le bot est admin dans ce canal.</i>",
+        )
+    msg.stop_propagation()
+# ─────────────────────────────────────────────────────────────
 
 # ── NEW: Heartbeat (keeps Colab alive) ───────────────────────
 async def _heartbeat_task():

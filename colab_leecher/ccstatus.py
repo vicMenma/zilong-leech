@@ -29,6 +29,7 @@ from pyrogram.types import (
 
 from colab_leecher import colab_bot, OWNER, CC_API_KEY
 from colab_leecher.cc_job_store import cc_job_store, CCJob
+from colab_leecher.forward_channels import fwd_channels
 from colab_leecher.utility.variables import Paths
 
 log = logging.getLogger(__name__)
@@ -457,6 +458,34 @@ async def _deliver_job(job: CCJob) -> None:
         await upload_file(dest, fname, is_last=True)
         await cc_job_store.mark_notified(job.job_id)
         log.info("[CCStatus] Delivered %s to uid=%d", fname, job.uid)
+
+        # ── Auto-forward to configured channels ───────────────
+        channels = fwd_channels.all()
+        if channels:
+            ext_low = os.path.splitext(fname)[1].lower()
+            _VIDEO_EXTS = {".mp4", ".mkv", ".avi", ".mov", ".webm", ".flv", ".ts"}
+            for ch in channels:
+                try:
+                    cap = f"☁️ <b>CloudConvert</b>\n<code>{fname[:50]}</code>"
+                    if ext_low in _VIDEO_EXTS:
+                        await colab_bot.send_video(
+                            ch["id"], dest, caption=cap,
+                            supports_streaming=True,
+                        )
+                    else:
+                        await colab_bot.send_document(ch["id"], dest, caption=cap)
+                    log.info("[CCStatus] Forwarded %s to channel %s (%s)",
+                             fname, ch["id"], ch.get("name", ""))
+                except Exception as fe:
+                    log.warning("[CCStatus] Forward to %s failed: %s", ch["id"], fe)
+                    try:
+                        await colab_bot.send_message(
+                            OWNER,
+                            f"⚠️ <b>Transfert vers <code>{ch.get('name', ch['id'])}</code> échoué</b>\n"
+                            f"<code>{str(fe)[:150]}</code>",
+                        )
+                    except Exception:
+                        pass
 
     except Exception as exc:
         log.error("[CCStatus] Delivery failed %s: %s", job.job_id, exc, exc_info=True)
