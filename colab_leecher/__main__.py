@@ -1,13 +1,15 @@
 """
 colab_leecher/__main__.py
-ORIGINAL code unchanged — new sections are marked ── NEW ──.
+Original code unchanged — new sections marked ── NEW ──.
 
-Additions:
-  • Bot name ask at first start (bot_name.py)
-  • Colab heartbeat task (keeps session alive)
-  • ccstatus poller auto-start (CC job delivery without webhook)
-  • /botname command (rename the bot at any time)
-  • /convert and /ccstatus are registered by importing ccstatus module
+Additions vs original:
+  • Bot name prompt is the VERY FIRST message sent when the bot starts
+    for the first time (before any webhook, before any other setup).
+    On subsequent starts the saved name is used silently.
+  • /botname command to rename at any time.
+  • Heartbeat task (prints 💓 every 5 min to keep Colab alive).
+  • ccstatus poller auto-start (CC job delivery without webhook).
+  • /ccstatus and /convert registered by importing ccstatus module.
 """
 import logging
 import os
@@ -33,12 +35,11 @@ from colab_leecher.stream_extractor import (
 )
 import colab_leecher.hardsub as _hardsub_module
 
-# ── NEW: imports for added features ─────────────────────────
+# ── NEW ─────────────────────────────────────────────────────
 import asyncio
-import threading
 from colab_leecher.bot_name import get_bot_name, set_bot_name, is_name_configured
-import colab_leecher.ccstatus as _ccstatus_module   # registers /ccstatus + /convert
-from colab_leecher.cc_job_store import cc_job_store  # noqa — ensures store is loaded
+import colab_leecher.ccstatus as _ccstatus_module     # registers /ccstatus + /convert
+from colab_leecher.cc_job_store import cc_job_store   # noqa — loads store on import
 # ─────────────────────────────────────────────────────────────
 
 
@@ -73,7 +74,7 @@ async def _show_sx_type_menu(msg, session: dict) -> None:
 @colab_bot.on_message(filters.command("start") & filters.private)
 async def start(client, message):
     await message.delete()
-    bot_name = get_bot_name().upper()              # ── NEW: use bot name
+    bot_name = get_bot_name().upper()   # ── NEW
     await message.reply_text(
         f"⚡ <b>{bot_name} BOT</b>\n"
         "──────────────────\n"
@@ -102,25 +103,20 @@ async def help_cmd(client, message):
         "⚙️ <b>Commandes</b>\n"
         "  /settings · /stats · /ping\n"
         "  /cancel · /stop\n"
-        "  /hardsub — Graver sous-titres via CloudConvert\n"
-        "  /convert — Convertir résolution (CloudConvert)\n"
-        "  /ccstatus — Suivi jobs CloudConvert\n"
-        "  /botname — Renommer le bot\n\n"    # ── NEW
+        "  /hardsub  — Graver sous-titres via CloudConvert\n"
+        "  /convert  — Convertir résolution (CloudConvert)\n"
+        "  /ccstatus — Suivi jobs CloudConvert en direct\n"
+        "  /botname  — Renommer le bot\n\n"
         "──────────────────\n"
         "🎛 <b>Options (après le lien)</b>\n"
         "  <code>[nom.ext]</code>  — nom personnalisé\n\n"
         "──────────────────\n"
         "🎞 <b>Stream Extractor</b>\n"
-        "  Bouton <b>🎞 Stream Extractor</b> sur chaque lien.\n"
-        "  Choisir vidéo / audio / sous-titres\n"
-        "  avec langue, codec, résolution, taille.\n\n"
+        "  Bouton <b>🎞 Stream Extractor</b> sur chaque lien.\n\n"
         "📊 <b>Media Info</b>\n"
-        "  Bouton <b>📊 Media Info</b> sur chaque lien.\n"
-        "  Rapport complet publié sur Telegra.ph.\n\n"
+        "  Bouton <b>📊 Media Info</b> sur chaque lien.\n\n"
         "🔥 <b>Hardsub</b>\n"
-        "  Bouton <b>🔥 Hardsub (CC)</b> sur chaque lien,\n"
-        "  ou commande /hardsub.\n"
-        "  Grave le sous-titre dans la vidéo via CloudConvert.\n\n"
+        "  Bouton <b>🔥 Hardsub (CC)</b> ou /hardsub.\n\n"
         "🖼 Envoie une <b>image</b> pour définir la miniature"
     )
     msg = await message.reply_text(text)
@@ -250,15 +246,15 @@ async def cmd_botname(client, message):
     _waiting_botname.add(OWNER)
     await message.reply_text(
         f"✏️ <b>Renommer le bot</b>\n\n"
-        f"Nom actuel : <b>{cur}</b>\n\n"
+        f"Nom actuel : <code>{cur}</code>\n\n"
         "Envoie le nouveau nom (ex: <code>Kitagawa</code>)\n"
         "ou /cancel pour annuler.",
     )
 
 @colab_bot.on_message(
     filters.private & filters.text
-    & ~filters.command(["start","help","settings","stats","ping","cancel","stop",
-                        "setname","hardsub","ccstatus","convert","botname"]),
+    & ~filters.command(["start", "help", "settings", "stats", "ping", "cancel", "stop",
+                        "setname", "hardsub", "ccstatus", "convert", "botname"]),
     group=3,
 )
 async def botname_collector(client, message):
@@ -270,25 +266,24 @@ async def botname_collector(client, message):
         return
     _waiting_botname.discard(uid)
     set_bot_name(name)
-    display = name.upper()
     await message.reply_text(
         f"✅ <b>Nom mis à jour !</b>\n\n"
-        f"Le bot s'appelle maintenant : <b>{display} BOT</b>\n\n"
-        "<i>Redémarre le bot pour appliquer partout.</i>",
+        f"Nouveau nom : <b>{name.upper()} BOT</b>\n\n"
+        "<i>Redémarre le bot pour l'appliquer partout.</i>",
     )
     message.stop_propagation()
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 
 # ──────────────────────────────────────────────
-#  Réception du lien — choix du mode
+#  Réception du lien
 # ──────────────────────────────────────────────
 
 def _mode_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📄 Leech Normal",  callback_data="mode_normal")],
+        [InlineKeyboardButton("📄 Leech Normal",     callback_data="mode_normal")],
         [InlineKeyboardButton("🎞 Stream Extractor", callback_data="sx_open"),
          InlineKeyboardButton("📊 Media Info",       callback_data="mi_open")],
-        [InlineKeyboardButton("🔥 Hardsub (CC)",  callback_data="hs_from_url")],
+        [InlineKeyboardButton("🔥 Hardsub (CC)",     callback_data="hs_from_url")],
     ])
 
 @colab_bot.on_message(filters.create(isLink) & ~filters.photo & filters.private)
@@ -351,28 +346,21 @@ async def callbacks(client, cq):
         BOT.State.task_going = False
         return
 
-    # ════════════════════════════════════════════
-    #  STREAM EXTRACTOR
-    # ════════════════════════════════════════════
+    # ════ STREAM EXTRACTOR ════
 
     if data == "sx_open":
         url = (BOT.SOURCE or [None])[0]
         if not url:
             await cq.answer("Aucun URL trouvé.", show_alert=True); return
-
         await cq.message.edit_text(
-            "🎞 <b>STREAM EXTRACTOR</b>\n"
-            "──────────────────\n\n"
+            "🎞 <b>STREAM EXTRACTOR</b>\n──────────────────\n\n"
             f"⏳ <i>Analyse des pistes...</i>\n"
             f"<code>{url[:70]}{'…' if len(url) > 70 else ''}</code>"
         )
-
         session = await analyse(url, chat_id)
-
         if not session or (not session["video"] and not session["audio"] and not session["subs"]):
             await cq.message.edit_text(
-                "🎞 <b>STREAM EXTRACTOR</b>\n"
-                "──────────────────\n\n"
+                "🎞 <b>STREAM EXTRACTOR</b>\n──────────────────\n\n"
                 "❌ Impossible d'extraire les pistes.\n"
                 "<i>Vérifiez que le lien est accessible et compatible.</i>",
                 reply_markup=InlineKeyboardMarkup([[
@@ -380,7 +368,6 @@ async def callbacks(client, cq):
                 ]])
             )
             return
-
         await _show_sx_type_menu(cq.message, session)
         return
 
@@ -397,10 +384,8 @@ async def callbacks(client, cq):
         if not session["video"]: await cq.answer("Aucune piste vidéo.", show_alert=True); return
         dur_s = f"  ⏱ <code>{_fmt_dur(session.get('duration', 0))}</code>" if session.get("duration") else ""
         await cq.message.edit_text(
-            f"🎬 <b>PISTES VIDÉO</b>\n"
-            f"──────────────────\n"
-            f"<i>{session['title'][:50]}</i>{dur_s}\n\n"
-            "Appuie pour télécharger :",
+            f"🎬 <b>PISTES VIDÉO</b>\n──────────────────\n"
+            f"<i>{session['title'][:50]}</i>{dur_s}\n\nAppuie pour télécharger :",
             reply_markup=kb_video(session)
         )
         return
@@ -410,10 +395,8 @@ async def callbacks(client, cq):
         if not session: await cq.answer("Session expirée.", show_alert=True); return
         if not session["audio"]: await cq.answer("Aucune piste audio.", show_alert=True); return
         await cq.message.edit_text(
-            "🎵 <b>PISTES AUDIO</b>\n"
-            "──────────────────\n"
-            "<i>drapeau  langue  [codec]  débit  taille</i>\n\n"
-            "Appuie pour télécharger :",
+            "🎵 <b>PISTES AUDIO</b>\n──────────────────\n"
+            "<i>drapeau  langue  [codec]  débit  taille</i>\n\nAppuie pour télécharger :",
             reply_markup=kb_audio(session)
         )
         return
@@ -423,10 +406,8 @@ async def callbacks(client, cq):
         if not session: await cq.answer("Session expirée.", show_alert=True); return
         if not session["subs"]: await cq.answer("Aucun sous-titre.", show_alert=True); return
         await cq.message.edit_text(
-            "💬 <b>SOUS-TITRES</b>\n"
-            "──────────────────\n"
-            "<i>drapeau  langue  [format]</i>\n\n"
-            "Appuie pour télécharger :",
+            "💬 <b>SOUS-TITRES</b>\n──────────────────\n"
+            "<i>drapeau  langue  [format]</i>\n\nAppuie pour télécharger :",
             reply_markup=kb_subs(session)
         )
         return
@@ -444,28 +425,22 @@ async def callbacks(client, cq):
     if data.startswith("sx_dl_"):
         session = get_session(chat_id)
         if not session: await cq.answer("Session expirée.", show_alert=True); return
-
         parts = data.split("_")
         kind  = parts[2]
         idx   = int(parts[3])
-
         stream = (session["video"] if kind == "video"
                   else session["audio"] if kind == "audio"
                   else session["subs"])[idx]
-
         kind_fr = {"video": "Vidéo", "audio": "Audio", "sub": "Sous-titre"}.get(kind, kind)
         await cq.message.edit_text(
-            "🎞 <b>STREAM EXTRACTOR</b>\n"
-            "──────────────────\n\n"
+            "🎞 <b>STREAM EXTRACTOR</b>\n──────────────────\n\n"
             f"⬇️ <i>Téléchargement {kind_fr}...</i>\n\n"
-            f"<code>{stream['label'][:60]}</code>\n\n"
-            "⏳ <i>Patiente...</i>",
+            f"<code>{stream['label'][:60]}</code>\n\n⏳ <i>Patiente...</i>",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("❌ Annuler", callback_data="cancel")
             ]])
         )
         MSG.status_msg = cq.message
-
         os.makedirs(Paths.down_path, exist_ok=True)
         try:
             if kind == "video":
@@ -474,58 +449,45 @@ async def callbacks(client, cq):
                 fp = await dl_audio(session, idx, Paths.down_path)
             else:
                 fp = await dl_sub(session, idx, Paths.down_path)
-
             from colab_leecher.uploader.telegram import upload_file
             await upload_file(fp, os.path.basename(fp), is_last=True)
             clear_session(chat_id)
-
         except Exception as e:
             logging.error(f"[StreamDL] {e}")
             try:
                 await cq.message.edit_text(
-                    "🎞 <b>STREAM EXTRACTOR</b>\n"
-                    "──────────────────\n\n"
+                    "🎞 <b>STREAM EXTRACTOR</b>\n──────────────────\n\n"
                     f"❌ <b>Erreur :</b> <code>{e}</code>"
                 )
             except Exception:
                 pass
         return
 
-    # ════════════════════════════════════════════
-    #  MEDIA INFO
-    # ════════════════════════════════════════════
+    # ════ MEDIA INFO ════
 
     if data == "mi_open":
         url = (BOT.SOURCE or [None])[0]
         if not url:
             await cq.answer("Aucun URL trouvé.", show_alert=True); return
-
         await cq.message.edit_text(
-            "📊 <b>MEDIA INFO</b>\n"
-            "──────────────────\n\n"
+            "📊 <b>MEDIA INFO</b>\n──────────────────\n\n"
             "⏳ <i>Téléchargement et analyse en cours...</i>\n"
             f"<code>{url[:70]}{'…' if len(url) > 70 else ''}</code>"
         )
-
         try:
             from colab_leecher.media_info import get_inline_summary, get_mediainfo, post_to_telegraph
-            import tempfile as _tf
-
+            import tempfile as _tf, aiohttp as _aio, shutil as _sh
             tmp_dir  = _tf.mkdtemp(prefix="mi_", dir=getattr(Paths, "WORK_PATH", "/tmp"))
             fname    = url.split("/")[-1].split("?")[0][:60] or "media"
             tmp_path = os.path.join(tmp_dir, fname)
-
-            import aiohttp as _aio
             async with _aio.ClientSession() as sess:
                 async with sess.get(url, allow_redirects=True) as resp:
                     resp.raise_for_status()
                     content = await resp.content.read(67_108_864)
             with open(tmp_path, "wb") as fh:
                 fh.write(content)
-
             summary = await get_inline_summary(tmp_path)
             raw     = await get_mediainfo(tmp_path)
-
             kb_rows: list = []
             try:
                 tph_url = await post_to_telegraph(fname, raw)
@@ -533,19 +495,12 @@ async def callbacks(client, cq):
             except Exception:
                 pass
             kb_rows.append([InlineKeyboardButton("⏎ Retour", callback_data="sx_back")])
-
-            import shutil as _sh
             _sh.rmtree(tmp_dir, ignore_errors=True)
-
-            await cq.message.edit_text(
-                summary,
-                reply_markup=InlineKeyboardMarkup(kb_rows)
-            )
+            await cq.message.edit_text(summary, reply_markup=InlineKeyboardMarkup(kb_rows))
         except Exception as exc:
             logging.error(f"[MediaInfo] {exc}")
             await cq.message.edit_text(
-                "📊 <b>MEDIA INFO</b>\n"
-                "──────────────────\n\n"
+                "📊 <b>MEDIA INFO</b>\n──────────────────\n\n"
                 f"❌ <b>Erreur :</b> <code>{exc}</code>",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("⏎ Retour", callback_data="sx_back")
@@ -559,15 +514,13 @@ async def callbacks(client, cq):
             await cq.answer("Aucun URL trouvé.", show_alert=True); return
         raw_name = url.split("/")[-1].split("?")[0]
         import urllib.parse as _up
-        fname    = _up.unquote_plus(raw_name)[:50] or "video.mkv"
-        uid      = cq.from_user.id
-        await _hardsub_module.start_hardsub_for_url(client, cq.message, uid, url, fname)
+        fname = _up.unquote_plus(raw_name)[:50] or "video.mkv"
+        await _hardsub_module.start_hardsub_for_url(client, cq.message, cq.from_user.id, url, fname)
         return
 
     if data == "video":
         await cq.message.edit_text(
-            "🎥 <b>PARAMÈTRES VIDÉO</b>\n"
-            "──────────────────\n\n"
+            "🎥 <b>PARAMÈTRES VIDÉO</b>\n──────────────────\n\n"
             f"Convertir  <code>{BOT.Setting.convert_video}</code>\n"
             f"Découper   <code>{BOT.Setting.split_video}</code>\n"
             f"Format     <code>{BOT.Options.video_out.upper()}</code>\n"
@@ -585,8 +538,7 @@ async def callbacks(client, cq):
             ]))
     elif data == "caption":
         await cq.message.edit_text(
-            "✏️ <b>STYLE CAPTION</b>\n"
-            "──────────────────\n\n"
+            "✏️ <b>STYLE CAPTION</b>\n──────────────────\n\n"
             f"Actuel : <code>{BOT.Setting.caption}</code>",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("Monospace", callback_data="code-Monospace"),
@@ -598,8 +550,7 @@ async def callbacks(client, cq):
             ]))
     elif data == "thumb":
         await cq.message.edit_text(
-            "🖼 <b>MINIATURE</b>\n"
-            "──────────────────\n\n"
+            "🖼 <b>MINIATURE</b>\n──────────────────\n\n"
             f"Statut : {'✅ Définie' if BOT.Setting.thumbnail else '❌ Aucune'}\n\n"
             "Envoie une image pour mettre à jour.",
             reply_markup=InlineKeyboardMarkup([
@@ -658,56 +609,67 @@ async def handle_photo(client, message):
     await message_deleter(message, msg)
 
 
-# ── NEW: Heartbeat task (keeps Colab alive) ──────────────────
+# ── NEW: Heartbeat (keeps Colab alive) ───────────────────────
 async def _heartbeat_task():
-    """Prints a heartbeat dot every 5 min to prevent Colab idle disconnect."""
     while True:
         await asyncio.sleep(300)
-        from datetime import datetime as _dt
-        print(f"\r[{_dt.now().strftime('%H:%M')}] 💓", end="", flush=True)
-# ─────────────────────────────────────────────
+        print(f"\r[{datetime.now().strftime('%H:%M')}] 💓", end="", flush=True)
+# ─────────────────────────────────────────────────────────────
 
-# ── NEW: Bot name first-run setup ────────────────────────────
-async def _ask_bot_name_if_needed():
-    if is_name_configured():
-        return
 
-    fut = asyncio.get_event_loop().create_future()
+# ── NEW: Bot name first-run prompt ───────────────────────────
+async def _ask_bot_name() -> None:
+    """
+    Send the bot-name prompt and WAIT for the owner to reply before
+    the rest of _main() continues.  Uses an asyncio.Event so we
+    don't need a fragile one-shot handler approach.
+    """
+    answered = asyncio.Event()
+    chosen   = [None]
 
     @colab_bot.on_message(
         filters.private & filters.text & filters.user(OWNER),
         group=99,
     )
-    async def _on_name(client, msg):
+    async def _name_handler(client, msg):
         name = msg.text.strip()
-        if name and not name.startswith("/") and not fut.done():
-            fut.set_result(name)
-            msg.stop_propagation()
+        if not name or name.startswith("/"):
+            return
+        chosen[0] = name
+        answered.set()
+        msg.stop_propagation()
 
     await colab_bot.send_message(
         OWNER,
-        "👋 <b>First-time setup</b>\n\n"
-        "Quel nom veux-tu donner à ce bot ?\n"
-        "Envoie juste le nom — ex: <code>Kitagawa</code>\n\n"
-        "Le message /start affichera ensuite :\n"
-        "<b>⚡ KITAGAWA BOT</b>\n\n"
-        "<i>(Envoie n'importe quoi pour passer cette étape)</i>",
+        "👋 <b>Bienvenue !</b>\n\n"
+        "C'est la première fois que ce bot démarre.\n\n"
+        "❓ <b>Quel nom veux-tu lui donner ?</b>\n"
+        "Envoie juste le nom — ex: <code>Kitagawa</code> ou <code>Zilong</code>\n\n"
+        "<i>Ce nom apparaîtra dans /start et /stats.\n"
+        "Tu pourras le changer plus tard avec /botname.</i>",
     )
 
     try:
-        name = await asyncio.wait_for(fut, timeout=120)
+        await asyncio.wait_for(answered.wait(), timeout=180)
     except asyncio.TimeoutError:
-        name = "Zilong"
+        chosen[0] = "Zilong"
 
-    colab_bot.remove_handler(_on_name.__wrapped__, group=99)
+    # Unregister the one-shot handler
+    try:
+        colab_bot.remove_handler(_name_handler.__wrapped__, group=99)
+    except Exception:
+        pass
+
+    name = (chosen[0] or "Zilong").strip()
     set_bot_name(name)
 
     await colab_bot.send_message(
         OWNER,
-        f"✅ Nom sauvegardé : <b>{name.upper()} BOT</b>\n"
-        "Tu peux le changer plus tard avec /botname.",
+        f"✅ <b>Parfait !</b> Le bot s'appellera <b>{name.upper()} BOT</b>\n\n"
+        "Tu peux le changer à tout moment avec /botname.\n\n"
+        "🟢 <i>Démarrage en cours…</i>",
     )
-# ─────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
 
 
 # ──────────────────────────────────────────────
@@ -715,27 +677,28 @@ async def _ask_bot_name_if_needed():
 # ──────────────────────────────────────────────
 async def _main():
     await colab_bot.start()
-    logging.info("⚡ Zilong démarré.")
+    logging.info("⚡ Bot started.")
 
-    # ── NEW: first-run bot name ─────────────────────────────
-    await _ask_bot_name_if_needed()
+    # ── NEW: bot name prompt — MUST be first ─────────────────
+    # This runs BEFORE webhook, BEFORE poller, BEFORE idle.
+    # If already configured, skip silently.
+    if not is_name_configured():
+        await _ask_bot_name()
     bot_name = get_bot_name().upper()
     logging.info("🤖 Bot name: %s", bot_name)
-    # ────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
 
-    # ── NEW: start heartbeat ────────────────────────────────
+    # ── NEW: heartbeat ────────────────────────────────────────
     asyncio.create_task(_heartbeat_task())
-    logging.info("💓 Heartbeat task started (every 5 min)")
-    # ────────────────────────────────────────────────────────
+    logging.info("💓 Heartbeat started (every 5 min)")
+    # ─────────────────────────────────────────────────────────
 
-    # ── CloudConvert webhook (optional) ────────────────────
+    # ── CloudConvert webhook (optional) ──────────────────────
     if NGROK_TOKEN or CC_WEBHOOK_SECRET:
         try:
             import colab_leecher.cloudconvert_hook as _cc_hook
             _cc_hook.WEBHOOK_SECRET = CC_WEBHOOK_SECRET
-
             webhook_url = await _cc_hook.start_webhook_server(ngrok_token=NGROK_TOKEN)
-
             if webhook_url:
                 logging.info("☁️  CC webhook URL: %s", webhook_url)
                 await colab_bot.send_message(
@@ -744,22 +707,21 @@ async def _main():
                     f"<i>Event to subscribe: <b>job.finished</b></i>",
                 )
             else:
-                logging.info("☁️  CC webhook server running on localhost only.")
+                logging.info("☁️  CC webhook server on localhost only.")
         except Exception as exc:
-            logging.error("Failed to start CC webhook server: %s", exc)
+            logging.error("Failed to start CC webhook: %s", exc)
     else:
-        logging.info("ℹ️  CloudConvert webhook disabled.")
+        logging.info("ℹ️  CC webhook disabled (no NGROK_TOKEN).")
 
-    # ── NEW: start CC poller (delivers jobs without webhook) ─
+    # ── NEW: CC poller — always on when CC_API_KEY is set ────
     from colab_leecher import CC_API_KEY as _CC_KEY
     if _CC_KEY.strip():
         _ccstatus_module.ensure_poller()
-        logging.info("📡 CC poller started (polls every 5 s when jobs are active)")
-    # ────────────────────────────────────────────────────────
+        logging.info("📡 CC poller started")
+    # ─────────────────────────────────────────────────────────
 
     await idle()
 
-    # Graceful shutdown
     try:
         import colab_leecher.cloudconvert_hook as _cc_hook
         await _cc_hook.stop_webhook_server()

@@ -1,11 +1,11 @@
 """
 colab_leecher/cc_job_store.py
 Persistent JSON store for CloudConvert jobs.
-Used by hardsub.py (write) and ccstatus.py (read/poll).
 
-Jobs are written when submitted via /hardsub or /convert,
-then polled by ccstatus.py every 5 s until finished/error.
-Finished jobs linger 6 hours then are evicted.
+New fields vs v1:
+  progress_pct  — 0-100, weighted from per-task percent
+  active_task   — human name of the currently running CC task
+  elapsed_s     — seconds since job created (updated on every poll)
 """
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields as dc_fields
 from typing import Optional
 
 log = logging.getLogger(__name__)
@@ -37,7 +37,13 @@ class CCJob:
     finished_at:  float = 0.0
     notified:     bool  = False
     task_message: str   = ""
+    progress_pct: float = 0.0        # 0-100, weighted from per-task pct
+    active_task:  str   = ""         # e.g. "hardsub", "convert", "import-video"
+    elapsed_s:    int   = 0          # seconds elapsed since created_at
     created_at:   float = field(default_factory=time.time)
+
+
+_KNOWN_FIELDS = {f.name for f in dc_fields(CCJob)}
 
 
 class CCJobStore:
@@ -54,8 +60,9 @@ class CCJobStore:
                 raw = json.load(fh)
             for jid, d in raw.items():
                 try:
-                    self._jobs[jid] = CCJob(**d)
-                except TypeError:
+                    filtered = {k: v for k, v in d.items() if k in _KNOWN_FIELDS}
+                    self._jobs[jid] = CCJob(**filtered)
+                except Exception:
                     pass
             log.info("[CCJobStore] Loaded %d jobs", len(self._jobs))
         except FileNotFoundError:
@@ -89,7 +96,8 @@ class CCJobStore:
             self._evict()
             self._jobs[job.job_id] = job
             self._save()
-        log.info("[CCJobStore] Added job %s for uid=%d fname=%s", job.job_id, job.uid, job.fname)
+        log.info("[CCJobStore] Added job %s uid=%d fname=%s",
+                 job.job_id, job.uid, job.fname)
 
     async def update(self, job_id: str, **kw) -> None:
         async with self._lock:
@@ -99,6 +107,7 @@ class CCJobStore:
             for k, v in kw.items():
                 if hasattr(job, k):
                     setattr(job, k, v)
+            job.elapsed_s = int(time.time() - job.created_at)
             self._save()
 
     async def finish(self, job_id: str, export_url: str = "", error_msg: str = "") -> None:
@@ -107,12 +116,15 @@ class CCJobStore:
             if not job:
                 return
             if error_msg:
-                job.status    = "error"
-                job.error_msg = error_msg
+                job.status       = "error"
+                job.error_msg    = error_msg
+                job.progress_pct = 0.0
             else:
-                job.status     = "finished"
-                job.export_url = export_url
+                job.status       = "finished"
+                job.export_url   = export_url
+                job.progress_pct = 100.0
             job.finished_at = time.time()
+            job.elapsed_s   = int(job.finished_at - job.created_at)
             self._save()
         log.info("[CCJobStore] Job %s → %s", job_id, "error" if error_msg else "finished")
 
@@ -143,5 +155,5 @@ class CCJobStore:
         return list(self._jobs.values())
 
 
-# Singleton shared across modules
+# Singleton
 cc_job_store = CCJobStore()
