@@ -1,3 +1,7 @@
+"""
+colab_leecher/downlader/manager.py
+Same as original + aiohttp fallback for direct HTTP links when aria2c fails.
+"""
 import logging
 from natsort import natsorted
 from datetime import datetime
@@ -10,31 +14,25 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 from colab_leecher.downlader.aria2 import aria2_Download, get_Aria2c_Name
 from colab_leecher.downlader.telegram import TelegramDownload, media_Identifier
 from colab_leecher.utility.variables import (
-    BOT,
-    Gdrive,
-    Transfer,
-    MSG,
-    Messages,
-    Aria2c,
-    BotTimes,
+    BOT, Gdrive, Transfer, MSG, Messages, Aria2c, BotTimes,
 )
 from colab_leecher.utility.helper import (
-    isYtdlComplete,
-    keyboard,
-    sysINFO,
-    is_google_drive,
-    is_mega,
-    is_terabox,
-    is_ytdl_link,
-    is_telegram,
+    isYtdlComplete, keyboard, sysINFO,
+    is_google_drive, is_mega, is_terabox, is_ytdl_link, is_telegram,
 )
 from colab_leecher.downlader.gdrive import (
-    build_service,
-    g_DownLoad,
-    get_Gfolder_size,
-    getFileMetadata,
-    getIDFromURL,
+    build_service, g_DownLoad, get_Gfolder_size, getFileMetadata, getIDFromURL,
 )
+
+
+def _is_direct_http(link: str) -> bool:
+    """Return True for plain HTTP(S) links that are not special services."""
+    if not link.startswith("http"):
+        return False
+    for test in (is_google_drive, is_mega, is_terabox, is_ytdl_link, is_telegram):
+        if test(link):
+            return False
+    return True
 
 
 async def downloadManager(source, is_ytdl: bool):
@@ -63,10 +61,7 @@ async def downloadManager(source, is_ytdl: bool):
                     await YTDL_Status(link, i + 1)
                     try:
                         await MSG.status_msg.edit_text(
-                            text=Messages.task_msg
-                            + Messages.status_head
-                            + message
-                            + sysINFO(),
+                            text=Messages.task_msg + Messages.status_head + message + sysINFO(),
                             reply_markup=keyboard(),
                         )
                     except Exception:
@@ -75,20 +70,38 @@ async def downloadManager(source, is_ytdl: bool):
                         await sleep(2)
                 elif is_mega(link):
                     executor = ProcessPoolExecutor()
-                    # await loop.run_in_executor(executor, megadl, link, i + 1)
                     await megadl(link, i + 1)
                 elif is_terabox(link):
-                    tera_dn = f"<b>PLEASE WAIT ⌛</b>\n\n__Generating Download Link For__\n\n<code>{link}</code>"
+                    tera_dn = (
+                        f"<b>PLEASE WAIT ⌛</b>\n\n"
+                        f"__Generating Download Link For__\n\n<code>{link}</code>"
+                    )
                     try:
                         await MSG.status_msg.edit_text(
                             text=tera_dn + sysINFO(), reply_markup=keyboard()
                         )
                     except Exception as e1:
                         print(f"Couldn't Update text ! Because: {e1}")
-
                     await terabox_download(link, i + 1)
+                elif _is_direct_http(link):
+                    # Direct HTTP: try aria2c first (handles aiohttp fallback internally)
+                    aria2_dn = (
+                        f"<b>PLEASE WAIT ⌛</b>\n\n"
+                        f"__Getting Download Info For__\n\n<code>{link}</code>"
+                    )
+                    try:
+                        await MSG.status_msg.edit_text(
+                            text=aria2_dn + sysINFO(), reply_markup=keyboard()
+                        )
+                    except Exception as e1:
+                        print(f"Couldn't Update text ! Because: {e1}")
+                    Aria2c.link_info = False
+                    await aria2_Download(link, i + 1)
                 else:
-                    aria2_dn = f"<b>PLEASE WAIT ⌛</b>\n\n__Getting Download Info For__\n\n<code>{link}</code>"
+                    aria2_dn = (
+                        f"<b>PLEASE WAIT ⌛</b>\n\n"
+                        f"__Getting Download Info For__\n\n<code>{link}</code>"
+                    )
                     try:
                         await MSG.status_msg.edit_text(
                             text=aria2_dn + sysINFO(), reply_markup=keyboard()
@@ -104,7 +117,6 @@ async def downloadManager(source, is_ytdl: bool):
 
 
 async def calDownSize(sources):
-    global TRANSFER_INFO
     for link in natsorted(sources):
         if is_google_drive(link):
             await build_service()
@@ -147,12 +159,10 @@ async def get_d_name(link: str):
         Messages.download_name = meta["name"]
     elif is_telegram(link):
         media, _ = await media_Identifier(link)
-        Messages.download_name = media.file_name if hasattr(media, "file_name") else "None"  # type: ignore
+        Messages.download_name = media.file_name if hasattr(media, "file_name") else "None"
     elif is_ytdl_link(link):
         Messages.download_name = await get_YT_Name(link)
     elif is_mega(link):
-        Messages.download_name = (
-            "Don't Know 🥲 (Trying)"  # TODO: Get download name via megadl
-        )
+        Messages.download_name = "Don't Know 🥲 (Trying)"
     else:
         Messages.download_name = get_Aria2c_Name(link)
